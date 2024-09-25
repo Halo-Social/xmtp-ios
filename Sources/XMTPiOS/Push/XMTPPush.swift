@@ -62,8 +62,8 @@ public struct XMTPPush {
 		let request = Notifications_V1_RegisterInstallationRequest.with { request in
 			request.installationID = installationID
 			request.deliveryMechanism = Notifications_V1_DeliveryMechanism.with { delivery in
-				delivery.apnsDeviceToken = token
-				delivery.deliveryMechanismType = .apnsDeviceToken(token)
+				delivery.firebaseDeviceToken = token
+				delivery.deliveryMechanismType = .firebaseDeviceToken(token)
 			}
 		}
 
