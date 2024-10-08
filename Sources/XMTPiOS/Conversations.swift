@@ -751,13 +751,6 @@ public actor Conversations {
 	}
 
 	public func list(includeGroups: Bool = false) async throws -> [Conversation] {
-		if includeGroups {
-			try await sync()
-			let groups = try await groups()
-			for group in groups {
-				await self.addConversation(.group(group))
-			}
-		}
 		var newConversations: [Conversation] = []
 		let mostRecent = await self.getMostRecentConversation()
 		let pagination = Pagination(after: mostRecent?.createdAt)
@@ -786,6 +779,13 @@ public actor Conversations {
 				await self.addConversation(conversation)
 			}
 		}
+        if includeGroups {
+            try await sync()
+            let groups = try await groups()
+            for group in groups {
+                await self.addConversation(.group(group))
+            }
+        }
 		return await self.getSortedConversations()
 	}
 
