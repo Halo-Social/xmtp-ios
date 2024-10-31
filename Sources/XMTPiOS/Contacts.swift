@@ -94,13 +94,17 @@ public class ConsentList {
 				try preferences.append(PrivatePreferencesAction(serializedData: Data(payload)))
 			}
 			for preference in preferences {
-				for address in preference.allowAddress.walletAddresses {
-					_ = await allow(address: address)
-				}
-				
-				for address in preference.denyAddress.walletAddresses {
-					_ = await deny(address: address)
-				}
+                for address in preference.allowAddress.walletAddresses {
+                    if (address.hasPrefix("0x")) {
+                        _ = await allow(address: address)
+                    }
+                }
+                
+                for address in preference.denyAddress.walletAddresses {
+                    if (address.hasPrefix("0x")) {
+                        _ = await deny(address: address)
+                    }
+                }
 				
 				for groupId in preference.allowGroup.groupIds {
 					_ = await allowGroup(groupId: groupId)
