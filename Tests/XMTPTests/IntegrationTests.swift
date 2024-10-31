@@ -52,7 +52,7 @@ final class IntegrationTests: XCTestCase {
 		try await delayToPropagate()
 		let contact = try await alice.getUserContact(peerAddress: alice.address)
 
-		XCTAssertEqual(contact!.v2.keyBundle.identityKey.secp256K1Uncompressed, try alice.v1keys.identityKey.publicKey.secp256K1Uncompressed)
+		XCTAssertEqual(contact!.v2.keyBundle.identityKey.secp256K1Uncompressed, alice.privateKeyBundleV1.identityKey.publicKey.secp256K1Uncompressed)
 		XCTAssert(contact!.v2.keyBundle.identityKey.hasSignature == true, "no signature")
 		XCTAssert(contact!.v2.keyBundle.preKey.hasSignature == true, "pre key not signed")
 
@@ -154,7 +154,7 @@ final class IntegrationTests: XCTestCase {
 			options: opt
 		)
 		// And it uses the saved topic data for the conversation
-		let aliceConvo2 = try await alice2.conversations.importTopicData(
+		let aliceConvo2 = await alice2.conversations.importTopicData(
 				data: try Xmtp_KeystoreApi_V1_TopicMap.TopicData(serializedData: topicData))
 		XCTAssertEqual("example.com/alice-bob-1", aliceConvo2.conversationID)
 
@@ -474,7 +474,7 @@ final class IntegrationTests: XCTestCase {
 		key.publicKey.secp256K1Uncompressed.bytes = Data(try LibXMTP.publicKeyFromPrivateKeyK256(privateKeyBytes: keyBytes))
 
 		let client = try await XMTPiOS.Client.create(account: key)
-		XCTAssertEqual(client.environment, .dev)
+		XCTAssertEqual(client.apiClient.environment, .dev)
 
 		let conversations = try await client.conversations.list()
 		XCTAssertEqual(1, conversations.count)
@@ -542,7 +542,7 @@ final class IntegrationTests: XCTestCase {
 		key.publicKey.secp256K1Uncompressed.bytes = Data(try LibXMTP.publicKeyFromPrivateKeyK256(privateKeyBytes: keyBytes))
 
 		let client = try await XMTPiOS.Client.create(account: key)
-		XCTAssertEqual(client.environment, .dev)
+		XCTAssertEqual(client.apiClient.environment, .dev)
 
 		let convo = try await client.conversations.list()[0]
 		let message = try await convo.messages()[0]
@@ -565,7 +565,7 @@ final class IntegrationTests: XCTestCase {
 		key.publicKey.secp256K1Uncompressed.bytes = Data(try LibXMTP.publicKeyFromPrivateKeyK256(privateKeyBytes: keyBytes))
 
 		let client = try await XMTPiOS.Client.create(account: key)
-		XCTAssertEqual(client.environment, .dev)
+		XCTAssertEqual(client.apiClient.environment, .dev)
 
 		let convo = try await client.conversations.list()[0]
 		let message = try await convo.messages().last!

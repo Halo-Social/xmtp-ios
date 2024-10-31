@@ -21,7 +21,7 @@ class ConversationsTests: XCTestCase {
 		let created = Date()
 
 		let message = try MessageV1.encode(
-			sender: try fixtures.bobClient.v1keys,
+			sender: fixtures.bobClient.privateKeyBundleV1,
 			recipient: fixtures.aliceClient.v1keys.toPublicKeyBundle(),
 			message: try TextCodec().encode(content: "hello", client: client).serializedData(),
 			timestamp: created
@@ -206,7 +206,7 @@ class ConversationsTests: XCTestCase {
 		fixtures.aliceClient.conversations.list()
         let alixConversation = alixConversations.first(where: { $0.topic == boConversation.topic })
         XCTAssertNotNil(alixConversation)
-        let consentStatus = try await fixtures.aliceClient.contacts.isAllowed(fixtures.bobClient.address)
+        let consentStatus = await fixtures.aliceClient.contacts.isAllowed(fixtures.bobClient.address)
         XCTAssertTrue(consentStatus)
     }
 
@@ -228,7 +228,7 @@ class ConversationsTests: XCTestCase {
 			fixtures.aliceClient.conversations.list()
         let alixConversation = alixConversations.first(where: { $0.topic == boConversation.topic })
         XCTAssertNotNil(alixConversation)
-        let isDenied = try await fixtures.aliceClient.contacts.isDenied(fixtures.bobClient.address)
+        let isDenied = await fixtures.aliceClient.contacts.isDenied(fixtures.bobClient.address)
         XCTAssertTrue(isDenied)
     }
     
@@ -250,7 +250,7 @@ class ConversationsTests: XCTestCase {
 			fixtures.aliceClient.conversations.list()
         let alixConversation = alixConversations.first(where: { $0.topic == boConversation.topic })
         XCTAssertNotNil(alixConversation)
-        let isAllowed = try await fixtures.aliceClient.contacts.isAllowed(fixtures.bobClient.address)
+        let isAllowed = await fixtures.aliceClient.contacts.isAllowed(fixtures.bobClient.address)
         XCTAssertFalse(isAllowed)
     }
 }

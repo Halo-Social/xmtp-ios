@@ -13,11 +13,12 @@ public typealias PrivatePreferencesAction = Xmtp_MessageContents_PrivatePreferen
 public enum ConsentState: String, Codable {
 	case allowed, denied, unknown
 }
-public enum EntryType: String, Codable {
-	case address, group_id, inbox_id
-}
 
 public struct ConsentListEntry: Codable, Hashable {
+	public enum EntryType: String, Codable {
+		case address, group_id, inbox_id
+	}
+
 	static func address(_ address: String, type: ConsentState = .unknown) -> ConsentListEntry {
 		ConsentListEntry(value: address, entryType: .address, consentType: type)
 	}
@@ -57,66 +58,63 @@ public actor EntriesManager {
 
 public class ConsentList {
 	public let entriesManager = EntriesManager()
+	var publicKey: Data
+	var privateKey: Data
+	var identifier: String?
 	var lastFetched: Date?
 	var client: Client
 
 	init(client: Client) {
 		self.client = client
+		privateKey = client.privateKeyBundleV1.identityKey.secp256K1.bytes
+		publicKey = client.privateKeyBundleV1.identityKey.publicKey.secp256K1Uncompressed.bytes
+		identifier = try? LibXMTP.generatePrivatePreferencesTopicIdentifier(privateKey: privateKey)
 	}
 
 	func load() async throws -> [ConsentListEntry] {
-		if (client.hasV2Client) {
-			let privateKey = try client.v1keys.identityKey.secp256K1.bytes
-			let publicKey = try client.v1keys.identityKey.publicKey.secp256K1Uncompressed.bytes
-			let identifier = try? LibXMTP.generatePrivatePreferencesTopicIdentifier(privateKey: privateKey)
-			
-			guard let identifier = identifier else {
-				throw ContactError.invalidIdentifier
+		guard let identifier = identifier else {
+			throw ContactError.invalidIdentifier
+		}
+		let newDate = Date()
+
+		let pagination = Pagination(
+			limit: 500,
+            after: lastFetched,
+            direction: .ascending
+        )
+		let envelopes = try await client.apiClient.envelopes(topic: Topic.preferenceList(identifier).description, pagination: pagination)
+    lastFetched = newDate
+
+		var preferences: [PrivatePreferencesAction] = []
+
+		for envelope in envelopes {
+			let payload = try LibXMTP.userPreferencesDecrypt(publicKey: publicKey, privateKey: privateKey, message: envelope.message)
+
+			try preferences.append(PrivatePreferencesAction(serializedData: Data(payload)))
+		}
+		for preference in preferences {
+			for address in preference.allowAddress.walletAddresses {
+				_ = await allow(address: address)
 			}
-			let newDate = Date()
-			
-			let pagination = Pagination(
-				limit: 500,
-				after: lastFetched,
-				direction: .ascending
-			)
-			guard let apiClient = client.apiClient else {
-				throw ClientError.noV2Client("Error no V2 client initialized")
+
+			for address in preference.denyAddress.walletAddresses {
+				_ = await deny(address: address)
 			}
-			let envelopes = try await apiClient.envelopes(topic: Topic.preferenceList(identifier).description, pagination: pagination)
-			lastFetched = newDate
-			
-			var preferences: [PrivatePreferencesAction] = []
-			
-			for envelope in envelopes {
-				let payload = try LibXMTP.userPreferencesDecrypt(publicKey: publicKey, privateKey: privateKey, message: envelope.message)
-				
-				try preferences.append(PrivatePreferencesAction(serializedData: Data(payload)))
+
+			for groupId in preference.allowGroup.groupIds {
+				_ = await allowGroup(groupId: groupId)
 			}
-			for preference in preferences {
-				for address in preference.allowAddress.walletAddresses {
-					_ = await allow(address: address)
-				}
-				
-				for address in preference.denyAddress.walletAddresses {
-					_ = await deny(address: address)
-				}
-				
-				for groupId in preference.allowGroup.groupIds {
-					_ = await allowGroup(groupId: groupId)
-				}
-				
-				for groupId in preference.denyGroup.groupIds {
-					_ = await denyGroup(groupId: groupId)
-				}
-				
-				for inboxId in preference.allowInboxID.inboxIds {
-					_ = await allowInboxId(inboxId: inboxId)
-				}
-				
-				for inboxId in preference.denyInboxID.inboxIds {
-					_ = await denyInboxId(inboxId: inboxId)
-				}
+
+			for groupId in preference.denyGroup.groupIds {
+				_ = await denyGroup(groupId: groupId)
+			}
+			
+			for inboxId in preference.allowInboxID.inboxIds {
+				_ = await allowInboxId(inboxId: inboxId)
+			}
+
+			for inboxId in preference.denyInboxID.inboxIds {
+				_ = await denyInboxId(inboxId: inboxId)
 			}
 		}
 
@@ -124,69 +122,57 @@ public class ConsentList {
 	}
 
     func publish(entries: [ConsentListEntry]) async throws {
-		if (client.v3Client != nil) {
-			try await setV3ConsentState(entries: entries)
-		}
-		if (client.hasV2Client) {
-			let privateKey = try client.v1keys.identityKey.secp256K1.bytes
-			let publicKey = try client.v1keys.identityKey.publicKey.secp256K1Uncompressed.bytes
-			let identifier = try? LibXMTP.generatePrivatePreferencesTopicIdentifier(privateKey: privateKey)
-			guard let identifier = identifier else {
-				throw ContactError.invalidIdentifier
+      guard let identifier = identifier else {
+        throw ContactError.invalidIdentifier
+      }
+      var payload = PrivatePreferencesAction()
+
+      for entry in entries {
+        switch entry.entryType {
+		case .address:
+		  switch entry.consentType {
+		  case .allowed:
+			payload.allowAddress.walletAddresses.append(entry.value)
+		  case .denied:
+			  payload.denyAddress.walletAddresses.append(entry.value)
+		  case .unknown:
+			  payload.messageType = nil
+		  }
+		case .group_id:
+			switch entry.consentType {
+			case .allowed:
+				payload.allowGroup.groupIds.append(entry.value)
+			case .denied:
+				payload.denyGroup.groupIds.append(entry.value)
+			case .unknown:
+				payload.messageType = nil
+    	    }
+		case .inbox_id:
+			switch entry.consentType {
+			case .allowed:
+			  payload.allowInboxID.inboxIds.append(entry.value)
+			case .denied:
+				payload.denyInboxID.inboxIds.append(entry.value)
+			case .unknown:
+				payload.messageType = nil
 			}
-			var payload = PrivatePreferencesAction()
-			
-			for entry in entries {
-				switch entry.entryType {
-				case .address:
-					switch entry.consentType {
-					case .allowed:
-						payload.allowAddress.walletAddresses.append(entry.value)
-					case .denied:
-						payload.denyAddress.walletAddresses.append(entry.value)
-					case .unknown:
-						payload.messageType = nil
-					}
-				case .group_id:
-					switch entry.consentType {
-					case .allowed:
-						payload.allowGroup.groupIds.append(entry.value)
-					case .denied:
-						payload.denyGroup.groupIds.append(entry.value)
-					case .unknown:
-						payload.messageType = nil
-					}
-				case .inbox_id:
-					switch entry.consentType {
-					case .allowed:
-						payload.allowInboxID.inboxIds.append(entry.value)
-					case .denied:
-						payload.denyInboxID.inboxIds.append(entry.value)
-					case .unknown:
-						payload.messageType = nil
-					}
-				}
-			}
-			
-			let message = try LibXMTP.userPreferencesEncrypt(
-				publicKey: publicKey,
-				privateKey: privateKey,
-				message: payload.serializedData()
-			)
-			
-			let envelope = Envelope(
-				topic: Topic.preferenceList(identifier),
-				timestamp: Date(),
-				message: Data(message)
-			)
-			
-			try await client.publish(envelopes: [envelope])
 		}
-	}
-	
-	func setV3ConsentState(entries: [ConsentListEntry]) async throws {
-		try await client.v3Client?.setConsentStates(records: entries.map(\.toFFI))
-	}
+    }
+
+    let message = try LibXMTP.userPreferencesEncrypt(
+        publicKey: publicKey,
+        privateKey: privateKey,
+        message: payload.serializedData()
+    )
+
+    let envelope = Envelope(
+        topic: Topic.preferenceList(identifier),
+        timestamp: Date(),
+        message: Data(message)
+    )
+
+    try await client.publish(envelopes: [envelope])
+  }
 
 	func allow(address: String) async -> ConsentListEntry {
 		let entry = ConsentListEntry.address(address, type: ConsentState.allowed)
@@ -230,14 +216,7 @@ public class ConsentList {
 		return entry
 	}
 
-	func state(address: String) async throws -> ConsentState {
-		if let client = client.v3Client {
-			return try await client.getConsentState(
-				entityType: .address,
-				entity: address
-			).fromFFI
-		}
-
+	func state(address: String) async -> ConsentState {
 		guard let entry = await entriesManager.get(ConsentListEntry.address(address).key) else {
 			return .unknown
 		}
@@ -245,14 +224,7 @@ public class ConsentList {
 		return entry.consentType
 	}
 
-	func groupState(groupId: String) async throws -> ConsentState {
-		if let client = client.v3Client {
-			return try await client.getConsentState(
-				entityType: .conversationId,
-				entity: groupId
-			).fromFFI
-		}
-
+	func groupState(groupId: String) async -> ConsentState {
 		guard let entry =  await entriesManager.get(ConsentListEntry.groupId(groupId: groupId).key) else {
 			return .unknown
 		}
@@ -260,14 +232,7 @@ public class ConsentList {
 		return entry.consentType
 	}
 	
-	func inboxIdState(inboxId: String) async throws-> ConsentState {
-		if let client = client.v3Client {
-			return try await client.getConsentState(
-				entityType: .inboxId,
-				entity: inboxId
-			).fromFFI
-		}
-
+	func inboxIdState(inboxId: String) async -> ConsentState {
 		guard let entry = await entriesManager.get(ConsentListEntry.inboxId(inboxId).key) else {
 			return .unknown
 		}
@@ -293,34 +258,33 @@ public actor Contacts {
 		consentList = ConsentList(client: client)
 	}
 
-	public func refreshConsentList() async throws -> ConsentList {
-		let entries = try await consentList.load()
-		try await consentList.setV3ConsentState(entries: entries)
+  public func refreshConsentList() async throws -> ConsentList {
+		_ = try await consentList.load()
 		return consentList
 	}
 
-	public func isAllowed(_ address: String) async throws -> Bool {
-		return try await consentList.state(address: address) == .allowed
+	public func isAllowed(_ address: String) async -> Bool {
+		return await consentList.state(address: address) == .allowed
 	}
 
-	public func isDenied(_ address: String) async throws -> Bool {
-		return try await consentList.state(address: address) == .denied
+	public func isDenied(_ address: String) async -> Bool {
+		return await consentList.state(address: address) == .denied
 	}
 
-	public func isGroupAllowed(groupId: String) async throws -> Bool {
-		return try await consentList.groupState(groupId: groupId) == .allowed
+	public func isGroupAllowed(groupId: String) async -> Bool {
+		return await consentList.groupState(groupId: groupId) == .allowed
 	}
 
-	public func isGroupDenied(groupId: String) async throws -> Bool {
-		return try await consentList.groupState(groupId: groupId) == .denied
+	public func isGroupDenied(groupId: String) async -> Bool {
+		return await consentList.groupState(groupId: groupId) == .denied
 	}
 	
-	public func isInboxAllowed(inboxId: String) async throws -> Bool {
-		return try await consentList.inboxIdState(inboxId: inboxId) == .allowed
+	public func isInboxAllowed(inboxId: String) async -> Bool {
+		return await consentList.inboxIdState(inboxId: inboxId) == .allowed
 	}
 
-	public func isInboxDenied(inboxId: String) async throws -> Bool {
-		return try await consentList.inboxIdState(inboxId: inboxId) == .denied
+	public func isInboxDenied(inboxId: String) async -> Bool {
+		return await consentList.inboxIdState(inboxId: inboxId) == .denied
 	}
 
 	public func allow(addresses: [String]) async throws {

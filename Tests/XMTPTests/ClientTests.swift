@@ -15,9 +15,9 @@ import XMTPTestHelpers
 @available(iOS 15, *)
 class ClientTests: XCTestCase {
 	func testTakesAWallet() async throws {
-		let opts = ClientOptions(api: ClientOptions.Api(env: .local, isSecure: false))
+			try TestConfig.skip(because: "run manually against dev")
 		let fakeWallet = try PrivateKey.generate()
-		_ = try await Client.create(account: fakeWallet, options: opts)
+		_ = try await Client.create(account: fakeWallet)
 	}
 
 	func testPassingSavedKeysWithNoSignerWithMLSErrors() async throws {
@@ -50,7 +50,7 @@ class ClientTests: XCTestCase {
 			)
 		)
 
-		let keys = try client.privateKeyBundle
+		let keys = client.privateKeyBundle
 		let otherClient = try await Client.from(
 			bundle: keys,
 			options: .init(
@@ -204,59 +204,57 @@ class ClientTests: XCTestCase {
 		let fakeWallet = try PrivateKey.generate()
 		let client = try await Client.create(account: fakeWallet, options: opts)
 
-		XCTAssertEqual(1, try client.v1keys.preKeys.count)
+		XCTAssertEqual(1, client.privateKeyBundleV1.preKeys.count)
 
-		let preKey = try client.v1keys.preKeys[0]
+		let preKey = client.privateKeyBundleV1.preKeys[0]
 
 		XCTAssert(preKey.publicKey.hasSignature, "prekey not signed")
 	}
 
 	func testCanBeCreatedWithBundle() async throws {
-		let opts = ClientOptions(api: ClientOptions.Api(env: .local, isSecure: false))
+				try TestConfig.skip(because: "run manually against dev")
 		let fakeWallet = try PrivateKey.generate()
-		let client = try await Client.create(account: fakeWallet, options: opts)
+		let client = try await Client.create(account: fakeWallet)
 
-		let bundle = try client.privateKeyBundle
-		let clientFromV1Bundle = try await Client.from(bundle: bundle, options: opts)
+		let bundle = client.privateKeyBundle
+		let clientFromV1Bundle = try await Client.from(bundle: bundle)
 
 		XCTAssertEqual(client.address, clientFromV1Bundle.address)
-		XCTAssertEqual(try client.v1keys.identityKey, try clientFromV1Bundle.v1keys.identityKey)
-		XCTAssertEqual(try client.v1keys.preKeys, try clientFromV1Bundle.v1keys.preKeys)
+		XCTAssertEqual(client.privateKeyBundleV1.identityKey, clientFromV1Bundle.privateKeyBundleV1.identityKey)
+		XCTAssertEqual(client.privateKeyBundleV1.preKeys, clientFromV1Bundle.privateKeyBundleV1.preKeys)
 	}
 
 	func testCanBeCreatedWithV1Bundle() async throws {
-		let opts = ClientOptions(api: ClientOptions.Api(env: .local, isSecure: false))
+				try TestConfig.skip(because: "run manually against dev")
 		let fakeWallet = try PrivateKey.generate()
-		let client = try await Client.create(account: fakeWallet, options: opts)
+		let client = try await Client.create(account: fakeWallet)
 
-		let bundleV1 = try client.v1keys
-		let clientFromV1Bundle = try await Client.from(v1Bundle: bundleV1, options: opts)
+		let bundleV1 = client.v1keys
+		let clientFromV1Bundle = try await Client.from(v1Bundle: bundleV1)
 
 		XCTAssertEqual(client.address, clientFromV1Bundle.address)
-		XCTAssertEqual(try client.v1keys.identityKey, try clientFromV1Bundle.v1keys.identityKey)
-		XCTAssertEqual(try client.v1keys.preKeys, try clientFromV1Bundle.v1keys.preKeys)
+		XCTAssertEqual(client.privateKeyBundleV1.identityKey, clientFromV1Bundle.privateKeyBundleV1.identityKey)
+		XCTAssertEqual(client.privateKeyBundleV1.preKeys, clientFromV1Bundle.privateKeyBundleV1.preKeys)
 	}
 
 	func testCanAccessPublicKeyBundle() async throws {
-		let opts = ClientOptions(api: ClientOptions.Api(env: .local, isSecure: false))
 		let fakeWallet = try PrivateKey.generate()
-		let client = try await Client.create(account: fakeWallet, options: opts)
+		let client = try await Client.create(account: fakeWallet)
 
-		let publicKeyBundle = try client.keys.getPublicKeyBundle()
-		XCTAssertEqual(publicKeyBundle, try client.publicKeyBundle)
+		let publicKeyBundle = client.keys.getPublicKeyBundle()
+		XCTAssertEqual(publicKeyBundle, client.publicKeyBundle)
 	}
 
 	func testCanSignWithPrivateIdentityKey() async throws {
-		let opts = ClientOptions(api: ClientOptions.Api(env: .local, isSecure: false))
 		let fakeWallet = try PrivateKey.generate()
-		let client = try await Client.create(account: fakeWallet, options: opts)
+		let client = try await Client.create(account: fakeWallet)
 
 		let digest = Util.keccak256(Data("hello world".utf8))
 		let signature = try await client.keys.identityKey.sign(digest)
 
 		let recovered = try KeyUtilx.recoverPublicKeyKeccak256(from: signature.rawData, message: Data("hello world".utf8))
-		let bytes = try client.keys.identityKey.publicKey.secp256K1Uncompressed.bytes
-		XCTAssertEqual(recovered, bytes)
+
+		XCTAssertEqual(recovered, client.keys.identityKey.publicKey.secp256K1Uncompressed.bytes)
 	}
 
 	func testPreEnableIdentityCallback() async throws {
@@ -333,7 +331,7 @@ class ClientTests: XCTestCase {
 			)
 		)
 
-		let keys = try client.privateKeyBundle
+		let keys = client.privateKeyBundle
 		let bundleClient = try await Client.from(
 			bundle: keys,
 			options: .init(
@@ -458,32 +456,6 @@ class ClientTests: XCTestCase {
 		XCTAssertEqual(inboxId, alixClient.inboxID)
 	}
 	
-	func testCreatesAPureV3Client() async throws {
-		let key = try Crypto.secureRandomBytes(count: 32)
-		let alix = try PrivateKey.generate()
-		let options = ClientOptions.init(
-			api: .init(env: .local, isSecure: false),
-			   enableV3: true,
-			   encryptionKey: key
-		   )
-
-
-		let inboxId = try await Client.getOrCreateInboxId(options: options, address: alix.address)
-		let alixClient = try await Client.createV3(
-			account: alix,
-			options: options
-		)
-
-		XCTAssertEqual(inboxId, alixClient.inboxID)
-		
-		let alixClient2 = try await Client.buildV3(
-			address: alix.address,
-			options: options
-		)
-		
-		XCTAssertEqual(alixClient2.inboxID, alixClient.inboxID)
-	}
-	
 	func testRevokesAllOtherInstallations() async throws {
 		let key = try Crypto.secureRandomBytes(count: 32)
 		let alix = try PrivateKey.generate()
@@ -513,36 +485,11 @@ class ClientTests: XCTestCase {
 		)
 		
 		let state = try await alixClient3.inboxState(refreshFromNetwork: true)
-		XCTAssertEqual(state.installations.count, 3)
-		XCTAssert(state.installations.first?.createdAt != nil)
+		XCTAssertEqual(state.installationIds.count, 3)
 		
 		try await alixClient3.revokeAllOtherInstallations(signingKey: alix)
 		
 		let newState = try await alixClient3.inboxState(refreshFromNetwork: true)
-		XCTAssertEqual(newState.installations.count, 1)
-	}
-	
-	func testCreatesASCWClient() async throws {
-		throw XCTSkip("TODO: Need to write a SCW local deploy with anvil")
-		let key = try Crypto.secureRandomBytes(count: 32)
-		let alix = try FakeSCWWallet.generate()
-		let options = ClientOptions.init(
-			api: .init(env: .local, isSecure: false),
-			   enableV3: true,
-			   encryptionKey: key
-		   )
-
-
-		let inboxId = try await Client.getOrCreateInboxId(options: options, address: alix.address)
-		
-		let alixClient = try await Client.createV3(
-			account: alix,
-			options: options
-		)
-		
-		let alixClient2 = try await Client.buildV3(address: alix.address, options: options)
-		XCTAssertEqual(inboxId, alixClient.inboxID)
-		XCTAssertEqual(alixClient2.inboxID, alixClient.inboxID)
-
+		XCTAssertEqual(newState.installationIds.count, 1)
 	}
 }

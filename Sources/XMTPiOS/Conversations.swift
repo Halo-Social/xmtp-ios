@@ -2,7 +2,7 @@ import Foundation
 import LibXMTP
 
 public enum ConversationError: Error, CustomStringConvertible, LocalizedError {
-	case recipientNotOnNetwork, recipientIsSender, v1NotSupported(String), v2NotSupported(String), v3NotSupported(String)
+	case recipientNotOnNetwork, recipientIsSender, v1NotSupported(String)
 
 	public var description: String {
 		switch self {
@@ -12,10 +12,6 @@ public enum ConversationError: Error, CustomStringConvertible, LocalizedError {
 			return "ConversationError.recipientNotOnNetwork: Recipient is not on network"
 		case .v1NotSupported(let str):
 			return "ConversationError.v1NotSupported: V1 does not support: \(str)"
-		case .v2NotSupported(let str):
-			return "ConversationError.v2NotSupported: V2 does not support: \(str)"
-		case .v3NotSupported(let str):
-			return "ConversationError.v3NotSupported: V3 does not support: \(str)"
 		}
 	}
 	
@@ -49,19 +45,17 @@ public enum GroupError: Error, CustomStringConvertible, LocalizedError {
 	}
 }
 
-public enum ConversationOrder {
-	case createdAt, lastMessage
-}
+final class GroupStreamCallback: FfiConversationCallback {
+	let client: Client
+	let callback: (Group) -> Void
 
-final class ConversationStreamCallback: FfiConversationCallback {
-	let callback: (FfiConversation) -> Void
-
-	init(callback: @escaping (FfiConversation) -> Void) {
+	init(client: Client, callback: @escaping (Group) -> Void) {
+		self.client = client
 		self.callback = callback
 	}
 
-	func onConversation(conversation: FfiConversation) {
-		self.callback(conversation)
+	func onConversation(conversation: FfiGroup) {
+		self.callback(conversation.fromFFI(client: client))
 	}
 }
 
@@ -93,22 +87,11 @@ class StreamManager {
 	}
 }
 
-actor FfiStreamActor {
-    private var ffiStream: FfiStreamCloser?
-
-    func setFfiStream(_ stream: FfiStreamCloser?) {
-        ffiStream = stream
-    }
-
-    func endStream() {
-        ffiStream?.end()
-    }
-}
-
 /// Handles listing and creating Conversations.
 public actor Conversations {
 	var client: Client
 	var conversationsByTopic: [String: Conversation] = [:]
+	let streamHolder = StreamHolder()
 
 	init(client: Client) {
 		self.client = client
@@ -125,14 +108,7 @@ public actor Conversations {
 		guard let v3Client = client.v3Client else {
 			return 0
 		}
-		return try await v3Client.conversations().syncAllConversations()
-	}
-	
-	public func syncAllConversations() async throws -> UInt32 {
-		guard let v3Client = client.v3Client else {
-			return 0
-		}
-		return try await v3Client.conversations().syncAllConversations()
+		return try await v3Client.conversations().syncAllGroups()
 	}
 
 	public func groups(createdAfter: Date? = nil, createdBefore: Date? = nil, limit: Int? = nil) async throws -> [Group] {
@@ -149,228 +125,59 @@ public actor Conversations {
 		if let limit {
 			options.limit = Int64(limit)
 		}
-		return try await v3Client.conversations().listGroups(opts: options).map { $0.groupFromFFI(client: client) }
-	}
-	
-	public func dms(createdAfter: Date? = nil, createdBefore: Date? = nil, limit: Int? = nil) async throws -> [Dm] {
-		if (client.hasV2Client) {
-			throw ConversationError.v2NotSupported("Only supported with V3 only clients use newConversation instead")
-		}
-		guard let v3Client = client.v3Client else {
-			return []
-		}
-		var options = FfiListConversationsOptions(createdAfterNs: nil, createdBeforeNs: nil, limit: nil)
-		if let createdAfter {
-			options.createdAfterNs = Int64(createdAfter.millisecondsSinceEpoch)
-		}
-		if let createdBefore {
-			options.createdBeforeNs = Int64(createdBefore.millisecondsSinceEpoch)
-		}
-		if let limit {
-			options.limit = Int64(limit)
-		}
-		return try await v3Client.conversations().listDms(opts: options).map { $0.dmFromFFI(client: client) }
-	}
-	
-	public func listConversations(createdAfter: Date? = nil, createdBefore: Date? = nil, limit: Int? = nil, order: ConversationOrder = .createdAt, consentState: ConsentState? = nil) async throws -> [Conversation] {
-		if (client.hasV2Client) {
-			throw ConversationError.v2NotSupported("Only supported with V3 only clients use list instead")
-		}
-		// Todo: add ability to order and consent state
-		guard let v3Client = client.v3Client else {
-			return []
-		}
-		var options = FfiListConversationsOptions(createdAfterNs: nil, createdBeforeNs: nil, limit: nil)
-		if let createdAfter {
-			options.createdAfterNs = Int64(createdAfter.millisecondsSinceEpoch)
-		}
-		if let createdBefore {
-			options.createdBeforeNs = Int64(createdBefore.millisecondsSinceEpoch)
-		}
-		if let limit {
-			options.limit = Int64(limit)
-		}
-		let ffiConversations = try await v3Client.conversations().list(opts: options)
-
-		let filteredConversations = try filterByConsentState(ffiConversations, consentState: consentState)
-		let sortedConversations = try sortConversations(filteredConversations, order: order)
-
-		return try sortedConversations.map { try $0.toConversation(client: client) }
-	}
-
-	private func sortConversations(
-		_ conversations: [FfiConversation],
-		order: ConversationOrder
-	) throws -> [FfiConversation] {
-		switch order {
-		case .lastMessage:
-			let conversationWithTimestamp: [(FfiConversation, Int64?)] = try conversations.map { conversation in
-				let message = try conversation.findMessages(
-					opts: FfiListMessagesOptions(
-						sentBeforeNs: nil,
-						sentAfterNs: nil,
-						limit: 1,
-						deliveryStatus: nil,
-						direction: .descending
-					)
-				).first
-				return (conversation, message?.sentAtNs)
-			}
-
-			let sortedTuples = conversationWithTimestamp.sorted { (lhs, rhs) in
-				(lhs.1 ?? 0) > (rhs.1 ?? 0)
-			}
-			return sortedTuples.map { $0.0 }
-		case .createdAt:
-			return conversations
-		}
-	}
-
-	private func filterByConsentState(
-	  _ conversations: [FfiConversation],
-	  consentState: ConsentState?
-	) throws -> [FfiConversation] {
-	  guard let state = consentState else { return conversations }
-		return try conversations.filter { try $0.consentState() == state.toFFI }
+		return try await v3Client.conversations().list(opts: options).map { $0.fromFFI(client: client) }
 	}
 
 	public func streamGroups() async throws -> AsyncThrowingStream<Group, Error> {
 		AsyncThrowingStream { continuation in
-            let ffiStreamActor = FfiStreamActor()
-            let task = Task {
-				let groupCallback = ConversationStreamCallback() { group in
+			let task = Task {
+				let groupCallback = GroupStreamCallback(client: self.client) { group in
 					guard !Task.isCancelled else {
 						continuation.finish()
 						return
 					}
-					continuation.yield(group.groupFromFFI(client: self.client))
+					continuation.yield(group)
 				}
-				guard let stream = await self.client.v3Client?.conversations().streamGroups(callback: groupCallback) else {
+				guard let stream = await self.client.v3Client?.conversations().stream(callback: groupCallback) else {
 					continuation.finish(throwing: GroupError.streamingFailure)
 					return
 				}
-                await ffiStreamActor.setFfiStream(stream)
+
+				self.streamHolder.stream = stream
 				continuation.onTermination = { @Sendable reason in
-                    Task {
-                      await ffiStreamActor.endStream()
-                    }
+					stream.end()
 				}
 			}
 
 			continuation.onTermination = { @Sendable reason in
 				task.cancel()
-                Task {
-                  await ffiStreamActor.endStream()
-                }
+				self.streamHolder.stream?.end()
 			}
 		}
 	}
 
 	private func streamGroupConversations() -> AsyncThrowingStream<Conversation, Error> {
 		AsyncThrowingStream { continuation in
-            let ffiStreamActor = FfiStreamActor()
 			let task = Task {
-				let stream = await self.client.v3Client?.conversations().streamGroups(
-					callback: ConversationStreamCallback() { group in
+				self.streamHolder.stream = await self.client.v3Client?.conversations().stream(
+					callback: GroupStreamCallback(client: self.client) { group in
 						guard !Task.isCancelled else {
 							continuation.finish()
 							return
 						}
-						continuation.yield(Conversation.group(group.groupFromFFI(client: self.client)))
+						continuation.yield(Conversation.group(group))
 					}
 				)
-                await ffiStreamActor.setFfiStream(stream)
 				continuation.onTermination = { @Sendable reason in
-                    Task {
-                        await ffiStreamActor.endStream()
-                    }
+					self.streamHolder.stream?.end()
 				}
 			}
 
 			continuation.onTermination = { @Sendable reason in
 				task.cancel()
-                Task {
-                    await ffiStreamActor.endStream()
-                }
+				self.streamHolder.stream?.end()
 			}
 		}
-	}
-	
-	public func streamConversations() -> AsyncThrowingStream<Conversation, Error> {
-		AsyncThrowingStream { continuation in
-			if (client.hasV2Client) {
-				continuation.finish(throwing: ConversationError.v2NotSupported("Only supported with V3 only clients use stream instead"))
-				return
-			}
-			let ffiStreamActor = FfiStreamActor()
-			let task = Task {
-				let stream = await self.client.v3Client?.conversations().stream(
-					callback: ConversationStreamCallback() { conversation in
-						guard !Task.isCancelled else {
-							continuation.finish()
-							return
-						}
-						do {
-							let conversationType = try conversation.groupMetadata().conversationType()
-							if conversationType == "dm" {
-								continuation.yield(
-									Conversation.dm(conversation.dmFromFFI(client: self.client))
-								)
-							} else if conversationType == "group" {
-								continuation.yield(
-									Conversation.group(conversation.groupFromFFI(client: self.client))
-								)
-							}
-						} catch {
-							// Do nothing if the conversation type is neither a group or dm
-						}
-					}
-				)
-				await ffiStreamActor.setFfiStream(stream)
-				continuation.onTermination = { @Sendable reason in
-					Task {
-						await ffiStreamActor.endStream()
-					}
-				}
-			}
-
-			continuation.onTermination = { @Sendable reason in
-				task.cancel()
-				Task {
-					await ffiStreamActor.endStream()
-				}
-			}
-		}
-	}
-	
-	public func findOrCreateDm(with peerAddress: String) async throws -> Dm {
-		if (client.hasV2Client) {
-			throw ConversationError.v2NotSupported("Only supported with V3 only clients use newConversation instead")
-		}
-
-		guard let v3Client = client.v3Client else {
-			throw GroupError.alphaMLSNotEnabled
-		}
-		if peerAddress.lowercased() == client.address.lowercased() {
-			throw ConversationError.recipientIsSender
-		}
-		let canMessage = try await self.client.canMessageV3(address: peerAddress)
-		if !canMessage  {
-			throw ConversationError.recipientNotOnNetwork
-		}
-		
-		try await client.contacts.allow(addresses: [peerAddress])
-
-		if let existingDm = try await client.findDm(address: peerAddress) {
-			return existingDm
-		}
-		
-		let newDm = try await v3Client.conversations()
-			.createDm(accountAddress: peerAddress.lowercased())
-			.dmFromFFI(client: client)
-		
-		try await client.contacts.allow(addresses: [peerAddress])
-		return newDm
 	}
     
     public func newGroup(with addresses: [String],
@@ -451,95 +258,160 @@ public actor Conversations {
                                                                                                groupDescription: description,
 																							   groupPinnedFrameUrl: pinnedFrameUrl,
                                                                                                customPermissionPolicySet: permissionPolicySet
-																   )).groupFromFFI(client: client)
+																   )).fromFFI(client: client)
 		try await client.contacts.allowGroups(groupIds: [group.id])
 		return group
 	}
-	
-	public func streamAllConversationMessages() -> AsyncThrowingStream<DecodedMessage, Error> {
-		AsyncThrowingStream { continuation in
-			if (client.hasV2Client) {
-				continuation.finish(throwing: ConversationError.v2NotSupported("Only supported with V3 clients. Use streamAllMessages instead."))
-				return
-			}
-			let ffiStreamActor = FfiStreamActor()
-			let task = Task {
-				let stream = await self.client.v3Client?.conversations().streamAllMessages(
-					messageCallback: MessageCallback(client: self.client) { message in
-						guard !Task.isCancelled else {
-							continuation.finish()
-							Task {
-								await ffiStreamActor.endStream() // End the stream upon cancellation
-							}
-							return
+
+	/// Import a previously seen conversation.
+	/// See Conversation.toTopicData()
+	public func importTopicData(data: Xmtp_KeystoreApi_V1_TopicMap.TopicData) -> Conversation {
+		let conversation: Conversation
+		if !data.hasInvitation {
+			let sentAt = Date(timeIntervalSince1970: TimeInterval(data.createdNs / 1_000_000_000))
+			conversation = .v1(ConversationV1(client: client, peerAddress: data.peerAddress, sentAt: sentAt))
+		} else {
+			conversation = .v2(ConversationV2(
+				topic: data.invitation.topic,
+				keyMaterial: data.invitation.aes256GcmHkdfSha256.keyMaterial,
+				context: data.invitation.context,
+				peerAddress: data.peerAddress,
+				client: client,
+				createdAtNs: data.createdNs
+			))
+		}
+		Task {
+			await self.addConversation(conversation)
+		}
+		return conversation
+	}
+
+	public func listBatchMessages(topics: [String: Pagination?]) async throws -> [DecodedMessage] {
+		let requests = topics.map { topic, page in
+			makeQueryRequest(topic: topic, pagination: page)
+		}
+		/// The maximum number of requests permitted in a single batch call.
+		let maxQueryRequestsPerBatch = 50
+		let batches = requests.chunks(maxQueryRequestsPerBatch)
+			.map { requests in BatchQueryRequest.with { $0.requests = requests } }
+		var messages: [DecodedMessage] = []
+		// TODO: consider using a task group here for parallel batch calls
+		for batch in batches {
+			messages += try await client.apiClient.batchQuery(request: batch)
+				.responses.flatMap { res in
+					res.envelopes.compactMap { envelope in
+						let conversation = conversationsByTopic[envelope.contentTopic]
+						if conversation == nil {
+							print("discarding message, unknown conversation \(envelope)")
+							return nil
 						}
 						do {
-							continuation.yield(try MessageV3(client: self.client, ffiMessage: message).decode())
+							return try conversation?.decode(envelope)
 						} catch {
-							print("Error onMessage \(error)")
+							print("discarding message, unable to decode \(envelope)")
+							return nil
 						}
 					}
-				)
-				await ffiStreamActor.setFfiStream(stream)
-			}
+				}
+		}
+		return messages
+	}
 
-			continuation.onTermination = { _ in
-				task.cancel()
-				Task {
-					await ffiStreamActor.endStream()
+	public func listBatchDecryptedMessages(topics: [String: Pagination?]) async throws -> [DecryptedMessage] {
+		let requests = topics.map { topic, page in
+			makeQueryRequest(topic: topic, pagination: page)
+		}
+		/// The maximum number of requests permitted in a single batch call.
+		let maxQueryRequestsPerBatch = 50
+		let batches = requests.chunks(maxQueryRequestsPerBatch)
+			.map { requests in BatchQueryRequest.with { $0.requests = requests } }
+		var messages: [DecryptedMessage] = []
+		// TODO: consider using a task group here for parallel batch calls
+		for batch in batches {
+			messages += try await client.apiClient.batchQuery(request: batch)
+				.responses.flatMap { res in
+					res.envelopes.compactMap { envelope in
+						let conversation = conversationsByTopic[envelope.contentTopic]
+						if conversation == nil {
+							print("discarding message, unknown conversation \(envelope)")
+							return nil
+						}
+						do {
+							return try conversation?.decrypt(envelope)
+						} catch {
+							print("discarding message, unable to decode \(envelope)")
+							return nil
+						}
+					}
+				}
+		}
+		return messages
+	}
+
+	func streamAllV2Messages() -> AsyncThrowingStream<DecodedMessage, Error> {
+		AsyncThrowingStream { continuation in
+			let streamManager = StreamManager()
+			
+			Task {
+				var topics: [String] = [
+					Topic.userInvite(client.address).description,
+					Topic.userIntro(client.address).description
+				]
+
+				for conversation in try await list() {
+					topics.append(conversation.topic)
+				}
+
+				var subscriptionRequest = FfiV2SubscribeRequest(contentTopics: topics)
+
+				let subscriptionCallback = V2SubscriptionCallback { envelope in
+					Task {
+						do {
+							if let conversation = self.conversationsByTopic[envelope.contentTopic] {
+								let decoded = try conversation.decode(envelope)
+								continuation.yield(decoded)
+							} else if envelope.contentTopic.hasPrefix("/xmtp/0/invite-") {
+								let conversation = try self.fromInvite(envelope: envelope)
+								await self.addConversation(conversation)
+								topics.append(conversation.topic)
+								subscriptionRequest = FfiV2SubscribeRequest(contentTopics: topics)
+								try await streamManager.updateStream(with: subscriptionRequest)
+							} else if envelope.contentTopic.hasPrefix("/xmtp/0/intro-") {
+								let conversation = try self.fromIntro(envelope: envelope)
+								await self.addConversation(conversation)
+								let decoded = try conversation.decode(envelope)
+								continuation.yield(decoded)
+								topics.append(conversation.topic)
+								subscriptionRequest = FfiV2SubscribeRequest(contentTopics: topics)
+								try await streamManager.updateStream(with: subscriptionRequest)
+							} else {
+								print("huh \(envelope)")
+							}
+						} catch {
+							continuation.finish(throwing: error)
+						}
+					}
+				}
+				let newStream = try await client.subscribe2(request: subscriptionRequest, callback: subscriptionCallback)
+				streamManager.setStream(newStream)
+				
+				continuation.onTermination = { @Sendable reason in
+					Task {
+						try await streamManager.endStream()
+					}
 				}
 			}
 		}
 	}
-	
-	public func streamAllDecryptedConversationMessages() -> AsyncThrowingStream<DecryptedMessage, Error> {
-		AsyncThrowingStream { continuation in
-			if (client.hasV2Client) {
-				continuation.finish(throwing: ConversationError.v2NotSupported("Only supported with V3 clients. Use streamAllMessages instead."))
-				return
-			}
-			let ffiStreamActor = FfiStreamActor()
-			let task = Task {
-				let stream = await self.client.v3Client?.conversations().streamAllMessages(
-					messageCallback: MessageCallback(client: self.client) { message in
-						guard !Task.isCancelled else {
-							continuation.finish()
-							Task {
-								await ffiStreamActor.endStream() // End the stream upon cancellation
-							}
-							return
-						}
-						do {
-							continuation.yield(try MessageV3(client: self.client, ffiMessage: message).decrypt())
-						} catch {
-							print("Error onMessage \(error)")
-						}
-					}
-				)
-				await ffiStreamActor.setFfiStream(stream)
-			}
-
-			continuation.onTermination = { _ in
-				task.cancel()
-				Task {
-					await ffiStreamActor.endStream()
-				}
-			}
-		}
-	}
-
 
 	public func streamAllGroupMessages() -> AsyncThrowingStream<DecodedMessage, Error> {
 		AsyncThrowingStream { continuation in
-            let ffiStreamActor = FfiStreamActor()
 			let task = Task {
-				let stream = await self.client.v3Client?.conversations().streamAllGroupMessages(
+				self.streamHolder.stream = await self.client.v3Client?.conversations().streamAllMessages(
 					messageCallback: MessageCallback(client: self.client) { message in
 						guard !Task.isCancelled else {
 							continuation.finish()
-                            Task {
-                                await ffiStreamActor.endStream() // End the stream upon cancellation
-                            }
+							self.streamHolder.stream?.end() // End the stream upon cancellation
 							return
 						}
 						do {
@@ -549,26 +421,24 @@ public actor Conversations {
 						}
 					}
 				)
-                await ffiStreamActor.setFfiStream(stream)
 			}
 
 			continuation.onTermination = { _ in
 				task.cancel()
-                Task {
-                    await ffiStreamActor.endStream()
-                }
+				self.streamHolder.stream?.end()
 			}
 		}
 	}
 
 	public func streamAllMessages(includeGroups: Bool = false) -> AsyncThrowingStream<DecodedMessage, Error> {
 		AsyncThrowingStream<DecodedMessage, Error> { continuation in
-            @Sendable func forwardStreamToMerged(stream: AsyncThrowingStream<DecodedMessage, Error>) async {
+			@Sendable func forwardStreamToMerged(stream: AsyncThrowingStream<DecodedMessage, Error>) async {
 				do {
 					var iterator = stream.makeAsyncIterator()
 					while let element = try await iterator.next() {
 						guard !Task.isCancelled else {
 							continuation.finish()
+							self.streamHolder.stream?.end()
 							return
 						}
 						continuation.yield(element)
@@ -580,31 +450,30 @@ public actor Conversations {
 			}
 
 			let task = Task {
-                await forwardStreamToMerged(stream: streamAllV2Messages())
+				await forwardStreamToMerged(stream: streamAllV2Messages())
 			}
-            
-            let groupTask = includeGroups ? Task {
-                await forwardStreamToMerged(stream: streamAllGroupMessages())
-            } : nil
+
+			if includeGroups {
+				Task {
+					await forwardStreamToMerged(stream: streamAllGroupMessages())
+				}
+			}
 
 			continuation.onTermination = { _ in
 				task.cancel()
-                groupTask?.cancel()
+				self.streamHolder.stream?.end()
 			}
 		}
 	}
 
 	public func streamAllGroupDecryptedMessages() -> AsyncThrowingStream<DecryptedMessage, Error> {
 		AsyncThrowingStream { continuation in
-            let ffiStreamActor = FfiStreamActor()
 			let task = Task {
-				let stream = await self.client.v3Client?.conversations().streamAllGroupMessages(
+				self.streamHolder.stream = await self.client.v3Client?.conversations().streamAllMessages(
 					messageCallback: MessageCallback(client: self.client) { message in
 						guard !Task.isCancelled else {
 							continuation.finish()
-                            Task {
-                                await ffiStreamActor.endStream() // End the stream upon cancellation
-                            }
+							self.streamHolder.stream?.end() // End the stream upon cancellation
 							return
 						}
 						do {
@@ -614,26 +483,24 @@ public actor Conversations {
 						}
 					}
 				)
-                await ffiStreamActor.setFfiStream(stream)
 			}
 
 			continuation.onTermination = { _ in
 				task.cancel()
-                Task {
-                    await ffiStreamActor.endStream()
-                }
+				self.streamHolder.stream?.end()
 			}
 		}
 	}
 
 	public func streamAllDecryptedMessages(includeGroups: Bool = false) -> AsyncThrowingStream<DecryptedMessage, Error> {
 		AsyncThrowingStream<DecryptedMessage, Error> { continuation in
-            @Sendable func forwardStreamToMerged(stream: AsyncThrowingStream<DecryptedMessage, Error>) async {
+			@Sendable func forwardStreamToMerged(stream: AsyncThrowingStream<DecryptedMessage, Error>) async {
 				do {
 					var iterator = stream.makeAsyncIterator()
 					while let element = try await iterator.next() {
 						guard !Task.isCancelled else {
 							continuation.finish()
+							self.streamHolder.stream?.end()
 							return
 						}
 						continuation.yield(element)
@@ -647,16 +514,92 @@ public actor Conversations {
 			let task = Task {
 				await forwardStreamToMerged(stream: streamAllV2DecryptedMessages())
 			}
-            
-            let groupTask = includeGroups ? Task {
-                await forwardStreamToMerged(stream: streamAllGroupDecryptedMessages())
-            } : nil
+
+			if includeGroups {
+				Task {
+					await forwardStreamToMerged(stream: streamAllGroupDecryptedMessages())
+				}
+			}
 
 			continuation.onTermination = { _ in
-                task.cancel()
-                groupTask?.cancel()
+				task.cancel()
+				self.streamHolder.stream?.end()
 			}
 		}
+	}
+
+
+	
+	
+	func streamAllV2DecryptedMessages() -> AsyncThrowingStream<DecryptedMessage, Error> {
+		AsyncThrowingStream { continuation in
+			let streamManager = StreamManager()
+			
+			Task {
+				var topics: [String] = [
+					Topic.userInvite(client.address).description,
+					Topic.userIntro(client.address).description
+				]
+
+				for conversation in try await list() {
+					topics.append(conversation.topic)
+				}
+
+				var subscriptionRequest = FfiV2SubscribeRequest(contentTopics: topics)
+
+				let subscriptionCallback = V2SubscriptionCallback { envelope in
+					Task {
+						do {
+							if let conversation = self.conversationsByTopic[envelope.contentTopic] {
+								let decrypted = try conversation.decrypt(envelope)
+								continuation.yield(decrypted)
+							} else if envelope.contentTopic.hasPrefix("/xmtp/0/invite-") {
+								let conversation = try self.fromInvite(envelope: envelope)
+								await self.addConversation(conversation)
+								topics.append(conversation.topic)
+								subscriptionRequest = FfiV2SubscribeRequest(contentTopics: topics)
+								try await streamManager.updateStream(with: subscriptionRequest)
+							} else if envelope.contentTopic.hasPrefix("/xmtp/0/intro-") {
+								let conversation = try self.fromIntro(envelope: envelope)
+								await self.addConversation(conversation)
+								let decrypted = try conversation.decrypt(envelope)
+								continuation.yield(decrypted)
+								topics.append(conversation.topic)
+								subscriptionRequest = FfiV2SubscribeRequest(contentTopics: topics)
+								try await streamManager.updateStream(with: subscriptionRequest)
+							} else {
+								print("huh \(envelope)")
+							}
+						} catch {
+							continuation.finish(throwing: error)
+						}
+					}
+				}
+				let newStream = try await client.subscribe2(request: subscriptionRequest, callback: subscriptionCallback)
+				streamManager.setStream(newStream)
+				
+				continuation.onTermination = { @Sendable reason in
+					Task {
+						try await streamManager.endStream()
+					}
+				}
+			}
+		}
+	}
+
+	public func fromInvite(envelope: Envelope) throws -> Conversation {
+		let sealedInvitation = try SealedInvitation(serializedData: envelope.message)
+		let unsealed = try sealedInvitation.v1.getInvitation(viewer: client.keys)
+		return try .v2(ConversationV2.create(client: client, invitation: unsealed, header: sealedInvitation.v1.header))
+	}
+
+	public func fromIntro(envelope: Envelope) throws -> Conversation {
+		let messageV1 = try MessageV1.fromBytes(envelope.message)
+		let senderAddress = try messageV1.header.sender.walletAddress
+		let recipientAddress = try messageV1.header.recipient.walletAddress
+		let peerAddress = client.address == senderAddress ? recipientAddress : senderAddress
+		let conversationV1 = ConversationV1(client: client, peerAddress: peerAddress, sentAt: messageV1.sentAt)
+		return .v1(conversationV1)
 	}
 
 	private func findExistingConversation(with peerAddress: String, conversationID: String?) throws -> Conversation? {
@@ -671,14 +614,6 @@ public actor Conversations {
 		}
 		let group = try await v3Client.conversations().processStreamedWelcomeMessage(envelopeBytes: envelopeBytes)
 		return Group(ffiGroup: group, client: client)
-	}
-	
-	public func conversationFromWelcome(envelopeBytes: Data) async throws -> Conversation? {
-		guard let v3Client = client.v3Client else {
-			return nil
-		}
-		let conversation = try await v3Client.conversations().processStreamedWelcomeMessage(envelopeBytes: envelopeBytes)
-		return try conversation.toConversation(client: client)
 	}
 
 	public func newConversation(with peerAddress: String, context: InvitationV1.Context? = nil, consentProofPayload: ConsentProofPayload? = nil) async throws -> Conversation {
@@ -769,7 +704,12 @@ public actor Conversations {
 			}
 		}
 	}
-	
+
+	private func makeConversation(from sealedInvitation: SealedInvitation) throws -> ConversationV2 {
+		let unsealed = try sealedInvitation.v1.getInvitation(viewer: client.keys)
+		return try ConversationV2.create(client: client, invitation: unsealed, header: sealedInvitation.v1.header)
+	}
+
 	private func validateConsentSignature(signature: String, clientAddress: String, peerAddress: String, timestamp: UInt64) -> Bool {
 		// timestamp should be in the past
 		if timestamp > UInt64(Date().timeIntervalSince1970 * 1000) {
@@ -805,7 +745,7 @@ public actor Conversations {
 		}
 		let contacts = client.contacts
 		_ = try await contacts.refreshConsentList()
-		if try await (contacts.consentList.state(address: peerAddress) == .unknown) {
+		if await (contacts.consentList.state(address: peerAddress) == .unknown) {
 			try await contacts.allow(addresses: [peerAddress])
 		}
 	}
@@ -891,260 +831,9 @@ public actor Conversations {
 		}
 		return hmacKeysResponse
 	}
-	
-	// ------- V1 V2 to be deprecated ------
-	
-	/// Import a previously seen conversation.
-	/// See Conversation.toTopicData()
-	public func importTopicData(data: Xmtp_KeystoreApi_V1_TopicMap.TopicData) throws -> Conversation {
-		if (!client.hasV2Client) {
-			throw ConversationError.v3NotSupported("importTopicData only supported with V2 clients")
-		}
-		let conversation: Conversation
-		if !data.hasInvitation {
-			let sentAt = Date(timeIntervalSince1970: TimeInterval(data.createdNs / 1_000_000_000))
-			conversation = .v1(ConversationV1(client: client, peerAddress: data.peerAddress, sentAt: sentAt))
-		} else {
-			conversation = .v2(ConversationV2(
-				topic: data.invitation.topic,
-				keyMaterial: data.invitation.aes256GcmHkdfSha256.keyMaterial,
-				context: data.invitation.context,
-				peerAddress: data.peerAddress,
-				client: client,
-				createdAtNs: data.createdNs
-			))
-		}
-		Task {
-			await self.addConversation(conversation)
-		}
-		return conversation
-	}
-
-	public func listBatchMessages(topics: [String: Pagination?]) async throws -> [DecodedMessage] {
-		if (!client.hasV2Client) {
-			throw ConversationError.v3NotSupported("listBatchMessages only supported with V2 clients. Use listConversations order lastMessage")
-		}
-		let requests = topics.map { topic, page in
-			makeQueryRequest(topic: topic, pagination: page)
-		}
-		/// The maximum number of requests permitted in a single batch call.
-		let maxQueryRequestsPerBatch = 50
-		let batches = requests.chunks(maxQueryRequestsPerBatch)
-			.map { requests in BatchQueryRequest.with { $0.requests = requests } }
-		var messages: [DecodedMessage] = []
-		// TODO: consider using a task group here for parallel batch calls
-		guard let apiClient = client.apiClient else {
-			throw ClientError.noV2Client("Error no V2 client initialized")
-		}
-		for batch in batches {
-			messages += try await apiClient.batchQuery(request: batch)
-				.responses.flatMap { res in
-					res.envelopes.compactMap { envelope in
-						let conversation = conversationsByTopic[envelope.contentTopic]
-						if conversation == nil {
-							print("discarding message, unknown conversation \(envelope)")
-							return nil
-						}
-						do {
-							return try conversation?.decode(envelope)
-						} catch {
-							print("discarding message, unable to decode \(envelope)")
-							return nil
-						}
-					}
-				}
-		}
-		return messages
-	}
-
-	public func listBatchDecryptedMessages(topics: [String: Pagination?]) async throws -> [DecryptedMessage] {
-		if (!client.hasV2Client) {
-			throw ConversationError.v3NotSupported("listBatchMessages only supported with V2 clients. Use listConversations order lastMessage")
-		}
-		let requests = topics.map { topic, page in
-			makeQueryRequest(topic: topic, pagination: page)
-		}
-		/// The maximum number of requests permitted in a single batch call.
-		let maxQueryRequestsPerBatch = 50
-		let batches = requests.chunks(maxQueryRequestsPerBatch)
-			.map { requests in BatchQueryRequest.with { $0.requests = requests } }
-		var messages: [DecryptedMessage] = []
-		// TODO: consider using a task group here for parallel batch calls
-		guard let apiClient = client.apiClient else {
-			throw ClientError.noV2Client("Error no V2 client initialized")
-		}
-		for batch in batches {
-			messages += try await apiClient.batchQuery(request: batch)
-				.responses.flatMap { res in
-					res.envelopes.compactMap { envelope in
-						let conversation = conversationsByTopic[envelope.contentTopic]
-						if conversation == nil {
-							print("discarding message, unknown conversation \(envelope)")
-							return nil
-						}
-						do {
-							return try conversation?.decrypt(envelope)
-						} catch {
-							print("discarding message, unable to decode \(envelope)")
-							return nil
-						}
-					}
-				}
-		}
-		return messages
-	}
-
-	private func makeConversation(from sealedInvitation: SealedInvitation) throws -> ConversationV2 {
-		let unsealed = try sealedInvitation.v1.getInvitation(viewer: client.keys)
-		return try ConversationV2.create(client: client, invitation: unsealed, header: sealedInvitation.v1.header)
-	}
-	
-	func streamAllV2Messages() -> AsyncThrowingStream<DecodedMessage, Error> {
-		AsyncThrowingStream { continuation in
-			if (!client.hasV2Client) {
-				continuation.finish(throwing: ConversationError.v3NotSupported("Only supported with V2 clients. Use streamAllConversationMessages instead."))
-				return
-			}
-			let streamManager = StreamManager()
-			
-			Task {
-				var topics: [String] = [
-					Topic.userInvite(client.address).description,
-					Topic.userIntro(client.address).description
-				]
-
-				for conversation in try await list() {
-					topics.append(conversation.topic)
-				}
-
-				var subscriptionRequest = FfiV2SubscribeRequest(contentTopics: topics)
-
-				let subscriptionCallback = V2SubscriptionCallback { envelope in
-					Task {
-						do {
-							if let conversation = self.conversationsByTopic[envelope.contentTopic] {
-								let decoded = try conversation.decode(envelope)
-								continuation.yield(decoded)
-							} else if envelope.contentTopic.hasPrefix("/xmtp/0/invite-") {
-								let conversation = try self.fromInvite(envelope: envelope)
-								await self.addConversation(conversation)
-								topics.append(conversation.topic)
-								subscriptionRequest = FfiV2SubscribeRequest(contentTopics: topics)
-								try await streamManager.updateStream(with: subscriptionRequest)
-							} else if envelope.contentTopic.hasPrefix("/xmtp/0/intro-") {
-								let conversation = try self.fromIntro(envelope: envelope)
-								await self.addConversation(conversation)
-								let decoded = try conversation.decode(envelope)
-								continuation.yield(decoded)
-								topics.append(conversation.topic)
-								subscriptionRequest = FfiV2SubscribeRequest(contentTopics: topics)
-								try await streamManager.updateStream(with: subscriptionRequest)
-							} else {
-								print("huh \(envelope)")
-							}
-						} catch {
-							continuation.finish(throwing: error)
-						}
-					}
-				}
-				let newStream = try await client.subscribe2(request: subscriptionRequest, callback: subscriptionCallback)
-				streamManager.setStream(newStream)
-				
-				continuation.onTermination = { @Sendable reason in
-					Task {
-						try await streamManager.endStream()
-					}
-				}
-			}
-		}
-	}
-	
-	func streamAllV2DecryptedMessages() -> AsyncThrowingStream<DecryptedMessage, Error> {
-		AsyncThrowingStream { continuation in
-			let streamManager = StreamManager()
-			if (!client.hasV2Client) {
-				continuation.finish(throwing: ConversationError.v3NotSupported("Only supported with V2 clients. Use streamAllDecryptedConversationMessages instead."))
-				return
-			}
-			Task {
-				var topics: [String] = [
-					Topic.userInvite(client.address).description,
-					Topic.userIntro(client.address).description
-				]
-
-				for conversation in try await list() {
-					topics.append(conversation.topic)
-				}
-
-				var subscriptionRequest = FfiV2SubscribeRequest(contentTopics: topics)
-
-				let subscriptionCallback = V2SubscriptionCallback { envelope in
-					Task {
-						do {
-							if let conversation = self.conversationsByTopic[envelope.contentTopic] {
-								let decrypted = try conversation.decrypt(envelope)
-								continuation.yield(decrypted)
-							} else if envelope.contentTopic.hasPrefix("/xmtp/0/invite-") {
-								let conversation = try self.fromInvite(envelope: envelope)
-								await self.addConversation(conversation)
-								topics.append(conversation.topic)
-								subscriptionRequest = FfiV2SubscribeRequest(contentTopics: topics)
-								try await streamManager.updateStream(with: subscriptionRequest)
-							} else if envelope.contentTopic.hasPrefix("/xmtp/0/intro-") {
-								let conversation = try self.fromIntro(envelope: envelope)
-								await self.addConversation(conversation)
-								let decrypted = try conversation.decrypt(envelope)
-								continuation.yield(decrypted)
-								topics.append(conversation.topic)
-								subscriptionRequest = FfiV2SubscribeRequest(contentTopics: topics)
-								try await streamManager.updateStream(with: subscriptionRequest)
-							} else {
-								print("huh \(envelope)")
-							}
-						} catch {
-							continuation.finish(throwing: error)
-						}
-					}
-				}
-				let newStream = try await client.subscribe2(request: subscriptionRequest, callback: subscriptionCallback)
-				streamManager.setStream(newStream)
-				
-				continuation.onTermination = { @Sendable reason in
-					Task {
-						try await streamManager.endStream()
-					}
-				}
-			}
-		}
-	}
-
-	public func fromInvite(envelope: Envelope) throws -> Conversation {
-		if (!client.hasV2Client) {
-			throw ConversationError.v3NotSupported("fromIntro only supported with V2 clients use fromWelcome instead")
-		}
-		let sealedInvitation = try SealedInvitation(serializedData: envelope.message)
-		let unsealed = try sealedInvitation.v1.getInvitation(viewer: client.keys)
-		return try .v2(ConversationV2.create(client: client, invitation: unsealed, header: sealedInvitation.v1.header))
-	}
-
-	public func fromIntro(envelope: Envelope) throws -> Conversation {
-		if (!client.hasV2Client) {
-			throw ConversationError.v3NotSupported("fromIntro only supported with V2 clients use fromWelcome instead")
-		}
-		let messageV1 = try MessageV1.fromBytes(envelope.message)
-		let senderAddress = try messageV1.header.sender.walletAddress
-		let recipientAddress = try messageV1.header.recipient.walletAddress
-		let peerAddress = client.address == senderAddress ? recipientAddress : senderAddress
-		let conversationV1 = ConversationV1(client: client, peerAddress: peerAddress, sentAt: messageV1.sentAt)
-		return .v1(conversationV1)
-	}
-
 
 	private func listIntroductionPeers(pagination: Pagination?) async throws -> [String: Date] {
-		guard let apiClient = client.apiClient else {
-			throw ClientError.noV2Client("Error no V2 client initialized")
-		}
-		let envelopes = try await apiClient.query(
+		let envelopes = try await client.apiClient.query(
 			topic: .userIntro(client.address),
 			pagination: pagination
 		).envelopes
@@ -1152,7 +841,7 @@ public actor Conversations {
 			do {
 				let message = try MessageV1.fromBytes(envelope.message)
 				// Attempt to decrypt, just to make sure we can
-				_ = try message.decrypt(with: client.v1keys)
+				_ = try message.decrypt(with: client.privateKeyBundleV1)
 				return message
 			} catch {
 				return nil
@@ -1178,10 +867,7 @@ public actor Conversations {
 	}
 
 	private func listInvitations(pagination: Pagination?) async throws -> [SealedInvitation] {
-		guard let apiClient = client.apiClient else {
-			throw ClientError.noV2Client("Error no V2 client initialized")
-		}
-		var envelopes = try await apiClient.envelopes(
+		var envelopes = try await client.apiClient.envelopes(
 			topic: Topic.userInvite(client.address).description,
 			pagination: pagination
 		)

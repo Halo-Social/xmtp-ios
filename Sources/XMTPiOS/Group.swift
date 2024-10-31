@@ -27,7 +27,7 @@ final class StreamHolder {
 }
 
 public struct Group: Identifiable, Equatable, Hashable {
-	var ffiGroup: FfiConversation
+	var ffiGroup: FfiGroup
 	var client: Client
 	let streamHolder = StreamHolder()
 
@@ -39,7 +39,7 @@ public struct Group: Identifiable, Equatable, Hashable {
 		Topic.groupMessage(id).description
 	}
 
-	func metadata() throws -> FfiConversationMetadata {
+	func metadata() throws -> FfiGroupMetadata {
 		return try ffiGroup.groupMetadata()
 	}
     
@@ -112,16 +112,16 @@ public struct Group: Identifiable, Equatable, Hashable {
 	}
 
 	public var members: [Member] {
-		get async throws {
-			return try await ffiGroup.listMembers().map { ffiGroupMember in
+		get throws {
+			return try ffiGroup.listMembers().map { ffiGroupMember in
 				Member(ffiGroupMember: ffiGroupMember)
 			}
 		}
 	}
 
 	public var peerInboxIds: [String] {
-		get async throws {
-			var ids = try await members.map(\.inboxId)
+		get throws {
+			var ids = try members.map(\.inboxId)
 			if let index = ids.firstIndex(of: client.inboxID) {
 				ids.remove(at: index)
 			}
@@ -213,25 +213,15 @@ public struct Group: Identifiable, Equatable, Hashable {
         try await ffiGroup.updatePermissionPolicy(permissionUpdateType: FfiPermissionUpdateType.updateMetadata, permissionPolicyOption: PermissionOption.toFfiPermissionPolicy(option: newPermissionOption), metadataField: FfiMetadataField.pinnedFrameUrl)
 	}
 
-	public func updateConsentState(state: ConsentState) async throws {
-		if (client.hasV2Client) {
-			switch (state) {
-			case .allowed: try await client.contacts.allowGroups(groupIds: [id])
-			case .denied: try await client.contacts.denyGroups(groupIds: [id])
-			case .unknown: ()
-			}
-		}
-
-		try ffiGroup.updateConsentState(state: state.toFFI)
-	}
-
-	public func consentState() throws -> ConsentState{
-		return try ffiGroup.consentState().fromFFI
+	
+	public func processMessage(envelopeBytes: Data) async throws -> DecodedMessage {
+		let message = try await ffiGroup.processStreamedGroupMessage(envelopeBytes: envelopeBytes)
+		return try MessageV3(client: client, ffiMessage: message).decode()
 	}
 	
-	public func processMessage(envelopeBytes: Data) async throws -> MessageV3 {
-		let message = try await ffiGroup.processStreamedConversationMessage(envelopeBytes: envelopeBytes)
-		return MessageV3(client: client, ffiMessage: message)
+	public func processMessageDecrypted(envelopeBytes: Data) async throws -> DecryptedMessage {
+		let message = try await ffiGroup.processStreamedGroupMessage(envelopeBytes: envelopeBytes)
+		return try MessageV3(client: client, ffiMessage: message).decrypt()
 	}
 
 	public func send<T>(content: T, options: SendOptions? = nil) async throws -> String {
@@ -240,8 +230,10 @@ public struct Group: Identifiable, Equatable, Hashable {
 	}
 
 	public func send(encodedContent: EncodedContent) async throws -> String {
-		if (try consentState() == .unknown) {
-			try await updateConsentState(state: .allowed)
+		let groupState = await client.contacts.consentList.groupState(groupId: id)
+
+		if groupState == ConsentState.unknown {
+			try await client.contacts.allowGroups(groupIds: [id])
 		}
 
 		let messageId = try await ffiGroup.send(contentBytes: encodedContent.serializedData())
@@ -281,8 +273,10 @@ public struct Group: Identifiable, Equatable, Hashable {
 	}
 	
 	public func prepareMessage<T>(content: T, options: SendOptions? = nil) async throws -> String {
-		if (try consentState() == .unknown) {
-			try await updateConsentState(state: .allowed)
+		let groupState = await client.contacts.consentList.groupState(groupId: id)
+
+		if groupState == ConsentState.unknown {
+			try await client.contacts.allowGroups(groupIds: [id])
 		}
 		
 		let encodeContent = try await encodeContent(content: content, options: options)
@@ -368,8 +362,7 @@ public struct Group: Identifiable, Equatable, Hashable {
 			sentBeforeNs: nil,
 			sentAfterNs: nil,
 			limit: nil,
-			deliveryStatus: nil,
-			direction: nil
+			deliveryStatus: nil
 		)
 
 		if let before {
@@ -398,20 +391,16 @@ public struct Group: Identifiable, Equatable, Hashable {
 		}()
 
 		options.deliveryStatus = status
-		
-		let direction: FfiDirection? = {
-			switch direction {
-			case .ascending:
-				return FfiDirection.ascending
-			default:
-				return FfiDirection.descending
-			}
-		}()
 
-		options.direction = direction
-
-		return try ffiGroup.findMessages(opts: options).compactMap { ffiMessage in
+		let messages = try ffiGroup.findMessages(opts: options).compactMap { ffiMessage in
 			return MessageV3(client: self.client, ffiMessage: ffiMessage).decodeOrNull()
+		}
+
+		switch direction {
+		case .ascending:
+			return messages
+		default:
+			return messages.reversed()
 		}
 	}
 
@@ -426,8 +415,7 @@ public struct Group: Identifiable, Equatable, Hashable {
 			sentBeforeNs: nil,
 			sentAfterNs: nil,
 			limit: nil,
-			deliveryStatus: nil,
-			direction: nil
+			deliveryStatus: nil
 		)
 
 		if let before {
@@ -456,20 +444,16 @@ public struct Group: Identifiable, Equatable, Hashable {
 		}()
 		
 		options.deliveryStatus = status
-		
-		let direction: FfiDirection? = {
-			switch direction {
-			case .ascending:
-				return FfiDirection.ascending
-			default:
-				return FfiDirection.descending
-			}
-		}()
 
-		options.direction = direction
-
-		return try ffiGroup.findMessages(opts: options).compactMap { ffiMessage in
+		let messages = try ffiGroup.findMessages(opts: options).compactMap { ffiMessage in
 			return MessageV3(client: self.client, ffiMessage: ffiMessage).decryptOrNull()
+		}
+		
+		switch direction {
+		case .ascending:
+			return messages
+		default:
+			return messages.reversed()
 		}
 	}
 }

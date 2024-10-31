@@ -37,7 +37,7 @@ public struct ConversationV2 {
 	private var header: SealedInvitationHeaderV1
 
 	static func create(client: Client, invitation: InvitationV1, header: SealedInvitationHeaderV1) throws -> ConversationV2 {
-		let myKeys = try client.keys.getPublicKeyBundle()
+		let myKeys = client.keys.getPublicKeyBundle()
 
 		let peer = try myKeys.walletAddress == (try header.sender.walletAddress) ? header.recipient : header.sender
 		let peerAddress = try peer.walletAddress
@@ -133,10 +133,7 @@ public struct ConversationV2 {
 
 	func messages(limit: Int? = nil, before: Date? = nil, after: Date? = nil, direction: PagingInfoSortDirection? = .descending) async throws -> [DecodedMessage] {
 		let pagination = Pagination(limit: limit, before: before, after: after, direction: direction)
-		guard let apiClient = client.apiClient else {
-			throw ClientError.noV2Client("Error no V2 client initialized")
-		}
-		let envelopes = try await apiClient.envelopes(topic: topic.description, pagination: pagination)
+		let envelopes = try await client.apiClient.envelopes(topic: topic.description, pagination: pagination)
 
 		return envelopes.compactMap { envelope in
 			do {
@@ -149,11 +146,8 @@ public struct ConversationV2 {
 	}
 
 	func decryptedMessages(limit: Int? = nil, before: Date? = nil, after: Date? = nil, direction: PagingInfoSortDirection? = .descending) async throws -> [DecryptedMessage] {
-		guard let apiClient = client.apiClient else {
-			throw ClientError.noV2Client("Error no V2 client initialized")
-		}
 		let pagination = Pagination(limit: limit, before: before, after: after, direction: direction)
-		let envelopes = try await apiClient.envelopes(topic: topic.description, pagination: pagination)
+		let envelopes = try await client.apiClient.envelopes(topic: topic.description, pagination: pagination)
 
 		return try envelopes.map { envelope in
 			try decrypt(envelope: envelope)
@@ -256,7 +250,7 @@ public struct ConversationV2 {
 
     @discardableResult func send(prepared: PreparedMessage) async throws -> String {
         try await client.publish(envelopes: prepared.envelopes)
-        if((try await client.contacts.consentList.state(address: peerAddress)) == .unknown) {
+        if((await client.contacts.consentList.state(address: peerAddress)) == .unknown) {
             try await client.contacts.allow(addresses: [peerAddress])
         }
         return prepared.messageID

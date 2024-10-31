@@ -13,9 +13,9 @@ public enum PermissionLevel {
 }
 
 public struct Member {
-    var ffiGroupMember: FfiConversationMember
+    var ffiGroupMember: FfiGroupMember
     
-    init(ffiGroupMember: FfiConversationMember) {
+    init(ffiGroupMember: FfiGroupMember) {
         self.ffiGroupMember = ffiGroupMember
     }
 
@@ -36,10 +36,6 @@ public struct Member {
         case .superAdmin:
             return PermissionLevel.SuperAdmin
         }
-	}
-	
-	public var consentState: ConsentState {
-		ffiGroupMember.consentState.fromFFI
 	}
 }
 

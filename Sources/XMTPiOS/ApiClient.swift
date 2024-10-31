@@ -38,8 +38,7 @@ extension GenericErrorDescribing {
 			let .Generic(message),
 			let .GroupMutablePermissions(message),
 			let .SignatureRequestError(message),
-			let .Erc1271SignatureError(message),
-			let .Verifier(message):
+			let .Erc1271SignatureError(message):
 			return message
 		}
 	}
