@@ -7,6 +7,7 @@
 
 #if canImport(XCTest)
 import Combine
+import CryptoKit
 import XCTest
 @testable import XMTPiOS
 import LibXMTP
@@ -67,6 +68,40 @@ public struct FakeWallet: SigningKey {
 	}
 }
 
+public struct FakeSCWWallet: SigningKey {
+	public var walletAddress: String
+	private var internalSignature: String
+	
+	public init() throws {
+		// Simulate a wallet address (could be derived from a hash of some internal data)
+		self.walletAddress = UUID().uuidString // Using UUID for uniqueness in this fake example
+		self.internalSignature = Data(repeating: 0x01, count: 64).toHex // Fake internal signature
+	}
+	
+	public var address: String {
+		walletAddress
+	}
+
+	public var type: WalletType {
+		WalletType.SCW
+	}
+	
+	public var chainId: Int64? {
+		1
+	}
+	
+	public static func generate() throws -> FakeSCWWallet {
+		return try FakeSCWWallet()
+	}
+	
+	public func signSCW(message: String) async throws -> Data {
+		// swiftlint:disable force_unwrapping
+		let digest = SHA256.hash(data: message.data(using: .utf8)!)
+		// swiftlint:enable force_unwrapping
+		return Data(digest)
+	}
+}
+
 @available(iOS 15, *)
 public struct Fixtures {
 	public var alice: PrivateKey!
@@ -88,7 +123,7 @@ public struct Fixtures {
 
 	public func publishLegacyContact(client: Client) async throws {
 		var contactBundle = ContactBundle()
-		contactBundle.v1.keyBundle = client.privateKeyBundleV1.toPublicKeyBundle()
+		contactBundle.v1.keyBundle = try client.v1keys.toPublicKeyBundle()
 
 		var envelope = Envelope()
 		envelope.contentTopic = Topic.contact(client.address).description
