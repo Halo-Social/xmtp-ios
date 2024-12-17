@@ -22,8 +22,8 @@ import UIKit
 public struct XMTPPush {
 	public static var shared = XMTPPush()
 
-	var installationID: String
-	var installationIDKey: String = "installationID"
+    public var installationID: String
+    public var installationIDKey: String = "installationID"
 
 	var pushServer: String = ""
 
@@ -62,8 +62,8 @@ public struct XMTPPush {
 		let request = Notifications_V1_RegisterInstallationRequest.with { request in
 			request.installationID = installationID
 			request.deliveryMechanism = Notifications_V1_DeliveryMechanism.with { delivery in
-				delivery.apnsDeviceToken = token
-				delivery.deliveryMechanismType = .apnsDeviceToken(token)
+                delivery.firebaseDeviceToken = token
+                delivery.deliveryMechanismType = .firebaseDeviceToken(token)
 			}
 		}
 
@@ -109,7 +109,7 @@ public struct XMTPPush {
 		_ = await client.unsubscribe(request: request)
 	}
 
-	var client: Notifications_V1_NotificationsClient {
+    public var client: Notifications_V1_NotificationsClient {
 		let protocolClient = ProtocolClient(
 			httpClient: URLSessionHTTPClient(),
 			config: ProtocolClientConfig(
