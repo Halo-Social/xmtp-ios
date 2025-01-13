@@ -134,17 +134,9 @@ class DmTests: XCTestCase {
 
 		let conversations = try await fixtures.boClient.conversations
 			.listDms()
-		let conversationsOrdered = try await fixtures.boClient.conversations
-			.listDms(order: .lastMessage)
-
 		XCTAssertEqual(conversations.count, 2)
-		XCTAssertEqual(conversationsOrdered.count, 2)
-
 		XCTAssertEqual(
-			try conversations.map { try $0.id }, [dm.id, dm2.id])
-		XCTAssertEqual(
-			try conversationsOrdered.map { try $0.id },
-			[dm2.id, dm.id])
+			try conversations.map { try $0.id }, [dm2.id, dm.id])
 	}
 
 	func testCanSendMessageToDm() async throws {
@@ -157,7 +149,7 @@ class DmTests: XCTestCase {
 		try await dm.sync()
 
 		let firstMessage = try await dm.messages().first!
-		XCTAssertEqual(firstMessage.body, "gm")
+		XCTAssertEqual(try firstMessage.body, "gm")
 		XCTAssertEqual(firstMessage.id, messageId)
 		XCTAssertEqual(firstMessage.deliveryStatus, .published)
 		let messages = try await dm.messages()
@@ -169,7 +161,7 @@ class DmTests: XCTestCase {
 
 		let sameMessages = try await sameDm.messages()
 		XCTAssertEqual(sameMessages.count, 2)
-		XCTAssertEqual(sameMessages.first!.body, "gm")
+		XCTAssertEqual(try sameMessages.first!.body, "gm")
 	}
 
 	func testCanStreamDmMessages() async throws {
