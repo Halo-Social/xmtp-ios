@@ -57,6 +57,27 @@ class ClientTests: XCTestCase {
 		}
 	}
 
+	func testStaticInboxState() async throws {
+		let fixtures = try await fixtures()
+
+		let inboxStates = try await Client.inboxStatesForInboxIds(
+			inboxIds: [
+				fixtures.alixClient.inboxID,
+				fixtures.boClient.inboxID,
+			],
+			api: ClientOptions.Api(env: .local, isSecure: false)
+		)
+
+		XCTAssertEqual(
+			inboxStates.first!.recoveryAddress.lowercased(),
+			fixtures.alixClient.address.lowercased()
+		)
+		XCTAssertEqual(
+			inboxStates.last!.recoveryAddress.lowercased(),
+			fixtures.boClient.address.lowercased()
+		)
+	}
+
 	func testCanDeleteDatabase() async throws {
 		let key = try Crypto.secureRandomBytes(count: 32)
 		let bo = try PrivateKey.generate()
@@ -301,6 +322,47 @@ class ClientTests: XCTestCase {
 		XCTAssertEqual(alixClient2.inboxID, alixClient.inboxID)
 	}
 
+	func testRevokeInstallations() async throws {
+		let key = try Crypto.secureRandomBytes(count: 32)
+		let alix = try PrivateKey.generate()
+
+		let alixClient = try await Client.create(
+			account: alix,
+			options: ClientOptions.init(
+				api: .init(env: .local, isSecure: false),
+				dbEncryptionKey: key
+			)
+		)
+
+		let alixClient2 = try await Client.create(
+			account: alix,
+			options: ClientOptions.init(
+				api: .init(env: .local, isSecure: false),
+				dbEncryptionKey: key,
+				dbDirectory: "xmtp_db1"
+			)
+		)
+
+		let alixClient3 = try await Client.create(
+			account: alix,
+			options: ClientOptions.init(
+				api: .init(env: .local, isSecure: false),
+				dbEncryptionKey: key,
+				dbDirectory: "xmtp_db2"
+			)
+		)
+
+		let state = try await alixClient3.inboxState(refreshFromNetwork: true)
+		XCTAssertEqual(state.installations.count, 3)
+
+		try await alixClient3.revokeInstallations(
+			signingKey: alix, installationIds: [alixClient2.installationID])
+
+		let newState = try await alixClient3.inboxState(
+			refreshFromNetwork: true)
+		XCTAssertEqual(newState.installations.count, 2)
+	}
+
 	func testRevokesAllOtherInstallations() async throws {
 		let key = try Crypto.secureRandomBytes(count: 32)
 		let alix = try PrivateKey.generate()
@@ -379,6 +441,25 @@ class ClientTests: XCTestCase {
 				fixtures.alixClient.address.lowercased(),
 			].sorted()
 		)
+	}
+
+	func testAddAccountsWithExistingInboxIds() async throws {
+		let fixtures = try await fixtures()
+
+		await assertThrowsAsyncError(
+			try await fixtures.alixClient.addAccount(newAccount: fixtures.bo))
+
+		XCTAssert(fixtures.boClient.inboxID != fixtures.alixClient.inboxID)
+		try await fixtures.alixClient.addAccount(
+			newAccount: fixtures.bo, allowReassignInboxId: true)
+
+		let state = try await fixtures.alixClient.inboxState(
+			refreshFromNetwork: true)
+		XCTAssertEqual(state.addresses.count, 2)
+
+		let inboxId = try await fixtures.alixClient.inboxIdFromAddress(
+			address: fixtures.boClient.address)
+		XCTAssertEqual(inboxId, fixtures.alixClient.inboxID)
 	}
 
 	func testRemovingAccounts() async throws {
@@ -490,91 +571,27 @@ class ClientTests: XCTestCase {
 			))
 	}
 
-	func testCreatesADevClientPerformance() async throws {
+	func testCreatesAClientManually() async throws {
 		let key = try Crypto.secureRandomBytes(count: 32)
-		let fakeWallet = try PrivateKey.generate()
-
-		// Measure time to create the client
-		let start = Date()
-		let client = try await Client.create(
-			account: fakeWallet,
-			options: ClientOptions(
-				api: ClientOptions.Api(env: .dev, isSecure: true),
-				dbEncryptionKey: key
-			)
-		)
-		let end = Date()
-		let time1 = end.timeIntervalSince(start)
-		print("PERF: Created a client in \(time1)s")
-
-		// Measure time to build a client
-		let start2 = Date()
-		let buildClient1 = try await Client.build(
-			address: fakeWallet.address,
-			options: ClientOptions(
-				api: ClientOptions.Api(env: .dev, isSecure: true),
-				dbEncryptionKey: key
-			)
-		)
-		let end2 = Date()
-		let time2 = end2.timeIntervalSince(start2)
-		print("PERF: Built a client in \(time2)s")
-
-		// Measure time to build a client with an inboxId
-		let start3 = Date()
-		let buildClient2 = try await Client.build(
-			address: fakeWallet.address,
-			options: ClientOptions(
-				api: ClientOptions.Api(env: .dev, isSecure: true),
-				dbEncryptionKey: key
-			),
-			inboxId: client.inboxID
-		)
-		let end3 = Date()
-		let time3 = end3.timeIntervalSince(start3)
-		print("PERF: Built a client with inboxId in \(time3)s")
-
-		// Measure time to build a client with an inboxId and apiClient
-		try await Client.connectToApiBackend(
-			api: ClientOptions.Api(env: .dev, isSecure: true))
-		let start4 = Date()
-		try await Client.create(
-			account: fakeWallet,
-			options: ClientOptions(
-				api: ClientOptions.Api(env: .dev, isSecure: true),
-				dbEncryptionKey: key
-			)
-		)
-		let end4 = Date()
-		let time4 = end4.timeIntervalSince(start4)
-		print("PERF: Create a client with prebuild in \(time4)s")
-
-		// Assert performance comparisons
-		XCTAssertTrue(
-			time2 < time1,
-			"Building a client should be faster than creating one.")
-		XCTAssertTrue(
-			time3 < time1,
-			"Building a client with inboxId should be faster than creating one."
-		)
-		XCTAssertTrue(
-			time3 < time2,
-			"Building a client with inboxId should be faster than building one without."
-		)
-		XCTAssertTrue(
-			time4 < time1,
-			"Creating a client with apiClient should be faster than creating one without."
+		let alix = try PrivateKey.generate()
+		let options = ClientOptions.init(
+			api: .init(env: .local, isSecure: false),
+			dbEncryptionKey: key
 		)
 
-		// Assert that inbox IDs match
-		XCTAssertEqual(
-			client.inboxID, buildClient1.inboxID,
-			"Inbox ID of the created client and first built client should match."
-		)
-		XCTAssertEqual(
-			client.inboxID, buildClient2.inboxID,
-			"Inbox ID of the created client and second built client should match."
-		)
+		let inboxId = try await Client.getOrCreateInboxId(
+			api: options.api, address: alix.address)
+		let client = try await Client.ffiCreateClient(
+			address: alix.address, clientOptions: options)
+		let sigRequest = client.ffiSignatureRequest()
+		try await sigRequest!.addEcdsaSignature(
+			signatureBytes: try alix.sign(message: sigRequest!.signatureText())
+				.rawData)
+		try await client.ffiRegisterIdentity(signatureRequest: sigRequest!)
+		let canMessage = try await client.canMessage(addresses: [client.address]
+		)[client.address]
+
+		XCTAssertTrue(canMessage == true)
+		XCTAssertEqual(inboxId, client.inboxID)
 	}
-
 }

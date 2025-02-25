@@ -6,15 +6,18 @@ import XMTPTestHelpers
 
 @available(iOS 16, *)
 class DmTests: XCTestCase {
-	
+
 	func testCanFindDmByInboxId() async throws {
 		let fixtures = try await fixtures()
 
-		let dm = try await fixtures.boClient.conversations.findOrCreateDm(with: fixtures.caro.walletAddress)
+		let dm = try await fixtures.boClient.conversations.findOrCreateDm(
+			with: fixtures.caro.walletAddress)
 
-		let caroDm = try fixtures.boClient.findDmByInboxId(inboxId: fixtures.caroClient.inboxID)
-		let alixDm = try fixtures.boClient.findDmByInboxId(inboxId: fixtures.alixClient.inboxID)
-		
+		let caroDm = try await fixtures.boClient.conversations.findDmByInboxId(
+			inboxId: fixtures.caroClient.inboxID)
+		let alixDm = try await fixtures.boClient.conversations.findDmByInboxId(
+			inboxId: fixtures.alixClient.inboxID)
+
 		XCTAssertNil(alixDm)
 		XCTAssertEqual(caroDm?.id, dm.id)
 	}
@@ -22,11 +25,14 @@ class DmTests: XCTestCase {
 	func testCanFindDmByAddress() async throws {
 		let fixtures = try await fixtures()
 
-		let dm = try await fixtures.boClient.conversations.findOrCreateDm(with: fixtures.caro.walletAddress)
+		let dm = try await fixtures.boClient.conversations.findOrCreateDm(
+			with: fixtures.caro.walletAddress)
 
-		let caroDm = try await fixtures.boClient.findDmByAddress(address: fixtures.caroClient.address)
-		let alixDm = try await fixtures.boClient.findDmByAddress(address: fixtures.alixClient.address)
-		
+		let caroDm = try await fixtures.boClient.conversations.findDmByAddress(
+			address: fixtures.caroClient.address)
+		let alixDm = try await fixtures.boClient.conversations.findDmByAddress(
+			address: fixtures.alixClient.address)
+
 		XCTAssertNil(alixDm)
 		XCTAssertEqual(caroDm?.id, dm.id)
 	}
@@ -39,6 +45,18 @@ class DmTests: XCTestCase {
 		try await fixtures.alixClient.conversations.sync()
 		let sameConvo1 = try await fixtures.alixClient.conversations
 			.findOrCreateDm(with: fixtures.bo.walletAddress)
+		XCTAssertEqual(convo1.id, sameConvo1.id)
+	}
+
+	func testCanCreateADmWithInboxId() async throws {
+		let fixtures = try await fixtures()
+
+		let convo1 = try await fixtures.boClient.conversations
+			.findOrCreateDmWithInboxId(
+				with: fixtures.alixClient.inboxID)
+		try await fixtures.alixClient.conversations.sync()
+		let sameConvo1 = try await fixtures.alixClient.conversations
+			.findOrCreateDmWithInboxId(with: fixtures.boClient.inboxID)
 		XCTAssertEqual(convo1.id, sameConvo1.id)
 	}
 
@@ -87,7 +105,7 @@ class DmTests: XCTestCase {
 		XCTAssertEqual(dmState, .allowed)
 		XCTAssertEqual(try dm.consentState(), .allowed)
 	}
-	
+
 	func testCanListDmsFiltered() async throws {
 		let fixtures = try await fixtures()
 
@@ -102,7 +120,7 @@ class DmTests: XCTestCase {
 		let convoCount = try await fixtures.boClient.conversations
 			.listDms().count
 		let convoCountConsent = try await fixtures.boClient.conversations
-			.listDms(consentState: .allowed).count
+			.listDms(consentStates: [.allowed]).count
 
 		XCTAssertEqual(convoCount, 2)
 		XCTAssertEqual(convoCountConsent, 2)
@@ -110,12 +128,15 @@ class DmTests: XCTestCase {
 		try await dm2.updateConsentState(state: .denied)
 
 		let convoCountAllowed = try await fixtures.boClient.conversations
-			.listDms(consentState: .allowed).count
+			.listDms(consentStates: [.allowed]).count
 		let convoCountDenied = try await fixtures.boClient.conversations
-			.listDms(consentState: .denied).count
+			.listDms(consentStates: [.denied]).count
+		let convoCountCombined = try await fixtures.boClient.conversations
+			.listDms(consentStates: [.denied, .allowed]).count
 
 		XCTAssertEqual(convoCountAllowed, 1)
 		XCTAssertEqual(convoCountDenied, 1)
+		XCTAssertEqual(convoCountCombined, 2)
 	}
 
 	func testCanListConversationsOrder() async throws {
@@ -153,7 +174,7 @@ class DmTests: XCTestCase {
 		XCTAssertEqual(firstMessage.id, messageId)
 		XCTAssertEqual(firstMessage.deliveryStatus, .published)
 		let messages = try await dm.messages()
-		XCTAssertEqual(messages.count, 2)
+		XCTAssertEqual(messages.count, 3)
 
 		try await fixtures.alixClient.conversations.sync()
 		let sameDm = try await fixtures.alixClient.conversations.listDms().last!
@@ -184,7 +205,7 @@ class DmTests: XCTestCase {
 
 		await fulfillment(of: [expectation1], timeout: 3)
 	}
-	
+
 	func testCanStreamDms() async throws {
 		let fixtures = try await fixtures()
 
@@ -261,5 +282,125 @@ class DmTests: XCTestCase {
 			.conversationState(conversationId: dm.id)
 		XCTAssertEqual(isAllowed, .allowed)
 		XCTAssertEqual(try dm.consentState(), .allowed)
+	}
+	
+	func testDmDisappearingMessages() async throws {
+		let fixtures = try await fixtures()
+
+		let initialSettings = DisappearingMessageSettings(
+			disappearStartingAtNs: 1_000_000_000,
+			retentionDurationInNs: 1_000_000_000  // 1s duration
+		)
+
+		// Create group with disappearing messages enabled
+		let boDm = try await fixtures.boClient.conversations.findOrCreateDm(
+			with: fixtures.alix.walletAddress,
+			disappearingMessageSettings: initialSettings
+		)
+		_ = try await boDm.send(content: "howdy")
+		_ = try await fixtures.alixClient.conversations.syncAllConversations()
+		
+		let alixDm = try await fixtures.alixClient.conversations.findDmByInboxId(inboxId: fixtures.boClient.inboxID)
+
+		let boGroupMessagesCount = try await boDm.messages().count
+		let alixGroupMessagesCount = try await alixDm?.messages().count
+		let boGroupSettings = boDm.disappearingMessageSettings
+
+		// Validate messages exist and settings are applied
+		XCTAssertEqual(boGroupMessagesCount, 2)  // memberAdd howdy
+		XCTAssertEqual(alixGroupMessagesCount, 1)  // howdy
+		XCTAssertNotNil(boGroupSettings)
+
+		try await Task.sleep(nanoseconds: 5_000_000_000)  // Sleep for 5 seconds
+
+		let boGroupMessagesAfterSleep = try await boDm.messages().count
+		let alixGroupMessagesAfterSleep = try await alixDm?.messages().count
+
+		// Validate messages are deleted
+		XCTAssertEqual(boGroupMessagesAfterSleep, 1)
+		XCTAssertEqual(alixGroupMessagesAfterSleep, 0)
+
+		// Set message disappearing settings to nil
+		try await boDm.updateDisappearingMessageSettings(nil)
+		try await boDm.sync()
+		try await alixDm?.sync()
+
+		let boGroupSettingsAfterNil = boDm.disappearingMessageSettings
+		let alixGroupSettingsAfterNil = alixDm?.disappearingMessageSettings
+
+		XCTAssertNil(boGroupSettingsAfterNil)
+		XCTAssertNil(alixGroupSettingsAfterNil)
+		XCTAssertFalse(try boDm.isDisappearingMessagesEnabled())
+		XCTAssertFalse(try alixDm!.isDisappearingMessagesEnabled())
+
+		// Send messages after disabling disappearing settings
+		_ = try await boDm.send(
+			content: "message after disabling disappearing")
+		_ = try await alixDm?.send(
+			content: "another message after disabling")
+		try await boDm.sync()
+
+		try await Task.sleep(nanoseconds: 5_000_000_000)  // Sleep for 5 seconds
+
+		let boGroupMessagesPersist = try await boDm.messages().count
+		let alixGroupMessagesPersist = try await alixDm?.messages().count
+
+		// Ensure messages persist
+		XCTAssertEqual(boGroupMessagesPersist, 5)  // memberAdd settings 1, settings 2, boMessage, alixMessage
+		XCTAssertEqual(alixGroupMessagesPersist, 4)  // settings 1, settings 2, boMessage, alixMessage
+
+		// Re-enable disappearing messages
+		let updatedSettings = await DisappearingMessageSettings(
+			disappearStartingAtNs: try boDm.messages().first!.sentAtNs
+				+ 1_000_000_000,  // 1s from now
+			retentionDurationInNs: 1_000_000_000  // 2s duration
+		)
+		try await boDm.updateDisappearingMessageSettings(updatedSettings)
+		try await boDm.sync()
+		try await alixDm?.sync()
+		try await Task.sleep(nanoseconds: 1_000_000_000)  // Sleep for 1 second
+
+		let boGroupUpdatedSettings = boDm.disappearingMessageSettings
+		let alixGroupUpdatedSettings = alixDm?.disappearingMessageSettings
+
+		XCTAssertEqual(
+			boGroupUpdatedSettings!.retentionDurationInNs,
+			updatedSettings.retentionDurationInNs)
+		XCTAssertEqual(
+			alixGroupUpdatedSettings!.retentionDurationInNs,
+			updatedSettings.retentionDurationInNs)
+
+		// Send new messages
+		_ = try await boDm.send(content: "this will disappear soon")
+		_ = try await alixDm?.send(content: "so will this")
+		try await boDm.sync()
+
+		let boGroupMessagesAfterNewSend = try await boDm.messages().count
+		let alixGroupMessagesAfterNewSend = try await alixDm?.messages()
+			.count
+
+		XCTAssertEqual(boGroupMessagesAfterNewSend, 9)
+		XCTAssertEqual(alixGroupMessagesAfterNewSend, 8)
+
+		try await Task.sleep(nanoseconds: 6_000_000_000)  // Sleep for 6 seconds to let messages disappear
+
+		let boGroupMessagesFinal = try await boDm.messages().count
+		let alixGroupMessagesFinal = try await alixDm?.messages().count
+
+		// Validate messages were deleted
+		XCTAssertEqual(boGroupMessagesFinal, 7)
+		XCTAssertEqual(alixGroupMessagesFinal, 6)
+
+		let boGroupFinalSettings = boDm.disappearingMessageSettings
+		let alixGroupFinalSettings = alixDm?.disappearingMessageSettings
+
+		XCTAssertEqual(
+			boGroupFinalSettings!.retentionDurationInNs,
+			updatedSettings.retentionDurationInNs)
+		XCTAssertEqual(
+			alixGroupFinalSettings!.retentionDurationInNs,
+			updatedSettings.retentionDurationInNs)
+		XCTAssert(try boDm.isDisappearingMessagesEnabled())
+		XCTAssert(try alixDm!.isDisappearingMessagesEnabled())
 	}
 }

@@ -60,14 +60,15 @@ public struct ClientOptions {
 		preAuthenticateToInboxCallback: PreEventCallback? = nil,
 		dbEncryptionKey: Data,
 		dbDirectory: String? = nil,
-		historySyncUrl: String? = nil
+		historySyncUrl: String? = nil,
+		useDefaultHistorySyncUrl: Bool = true
 	) {
 		self.api = api
 		self.codecs = codecs
 		self.preAuthenticateToInboxCallback = preAuthenticateToInboxCallback
 		self.dbEncryptionKey = dbEncryptionKey
 		self.dbDirectory = dbDirectory
-		if historySyncUrl == nil {
+		if useDefaultHistorySyncUrl && historySyncUrl == nil {
 			switch api.env {
 			case .production:
 				self.historySyncUrl =
@@ -107,13 +108,14 @@ public final class Client {
 	private static let apiCache = ApiClientCache()
 
 	public lazy var conversations: Conversations = .init(
-		client: self, ffiConversations: ffiClient.conversations())
+		client: self, ffiConversations: ffiClient.conversations(),
+		ffiClient: ffiClient)
 	public lazy var preferences: PrivatePreferences = .init(
 		client: self, ffiClient: ffiClient)
 
-	var codecRegistry = CodecRegistry()
+	static var codecRegistry = CodecRegistry()
 
-	public func register(codec: any ContentCodec) {
+	public static func register(codec: any ContentCodec) {
 		codecRegistry.register(codec: codec)
 	}
 
@@ -127,7 +129,6 @@ public final class Client {
 		let (libxmtpClient, dbPath) = try await initFFiClient(
 			accountAddress: accountAddress.lowercased(),
 			options: options,
-			signingKey: signingKey,
 			inboxId: inboxId
 		)
 
@@ -140,9 +141,29 @@ public final class Client {
 			environment: options.api.env
 		)
 
+		try await options.preAuthenticateToInboxCallback?()
+		if let signatureRequest = client.ffiClient.signatureRequest() {
+			if let signingKey = signingKey {
+				do {
+					try await handleSignature(
+						for: signatureRequest, signingKey: signingKey)
+					try await client.ffiClient.registerIdentity(
+						signatureRequest: signatureRequest)
+				} catch {
+					throw ClientError.creationError(
+						"Failed to sign the message: \(error.localizedDescription)"
+					)
+				}
+			} else {
+				throw ClientError.creationError(
+					"No v3 keys found, you must pass a SigningKey in order to enable alpha MLS features"
+				)
+			}
+		}
+
 		// Register codecs
 		for codec in options.codecs {
-			client.register(codec: codec)
+			register(codec: codec)
 		}
 
 		return client
@@ -187,10 +208,41 @@ public final class Client {
 		)
 	}
 
+	@available(
+		*,
+		deprecated,
+		message: """
+			This function is delicate and should be used with caution. 
+			Creating an FfiClient without signing or registering will create a broken experience. 
+			Use `create()` instead.
+			"""
+	)
+	public static func ffiCreateClient(
+		address: String, clientOptions: ClientOptions
+	) async throws -> Client {
+		let accountAddress = address.lowercased()
+		let recoveredInboxId = try await getOrCreateInboxId(
+			api: clientOptions.api, address: accountAddress)
+
+		let (ffiClient, dbPath) = try await initFFiClient(
+			accountAddress: accountAddress,
+			options: clientOptions,
+			inboxId: recoveredInboxId
+		)
+
+		return try Client(
+			address: accountAddress,
+			ffiClient: ffiClient,
+			dbPath: dbPath,
+			installationID: ffiClient.installationId().toHex,
+			inboxID: ffiClient.inboxId(),
+			environment: clientOptions.api.env
+		)
+	}
+
 	private static func initFFiClient(
 		accountAddress: String,
 		options: ClientOptions,
-		signingKey: SigningKey?,
 		inboxId: String
 	) async throws -> (FfiXmtpClient, String) {
 		let address = accountAddress.lowercased()
@@ -229,26 +281,6 @@ public final class Client {
 			legacySignedPrivateKeyProto: nil,
 			historySyncUrl: options.historySyncUrl
 		)
-
-		try await options.preAuthenticateToInboxCallback?()
-		if let signatureRequest = ffiClient.signatureRequest() {
-			if let signingKey = signingKey {
-				do {
-					try await handleSignature(
-						for: signatureRequest, signingKey: signingKey)
-					try await ffiClient.registerIdentity(
-						signatureRequest: signatureRequest)
-				} catch {
-					throw ClientError.creationError(
-						"Failed to sign the message: \(error.localizedDescription)"
-					)
-				}
-			} else {
-				throw ClientError.creationError(
-					"No v3 keys found, you must pass a SigningKey in order to enable alpha MLS features"
-				)
-			}
-		}
 
 		return (ffiClient, dbURL)
 	}
@@ -314,20 +346,14 @@ public final class Client {
 		return inboxId
 	}
 
-	public static func canMessage(
-		accountAddresses: [String],
-		api: ClientOptions.Api
-	) async throws -> [String: Bool] {
-		let address = "0x0000000000000000000000000000000000000000"
+	private static func prepareClient(
+		api: ClientOptions.Api,
+		address: String = "0x0000000000000000000000000000000000000000"
+	) async throws -> FfiXmtpClient {
 		let inboxId = try await getOrCreateInboxId(api: api, address: address)
-
-		let directoryURL: URL = URL.documentsDirectory
-		let alias = "xmtp-\(api.env.rawValue)-\(inboxId).db3"
-		let dbURL = directoryURL.appendingPathComponent(alias).path
-
-		let ffiClient = try await LibXMTP.createClient(
+		return try await LibXMTP.createClient(
 			api: connectToApiBackend(api: api),
-			db: dbURL,
+			db: nil,
 			encryptionKey: nil,
 			inboxId: inboxId,
 			accountAddress: address,
@@ -335,15 +361,25 @@ public final class Client {
 			legacySignedPrivateKeyProto: nil,
 			historySyncUrl: nil
 		)
+	}
 
-		let result = try await ffiClient.canMessage(
+	public static func canMessage(
+		accountAddresses: [String],
+		api: ClientOptions.Api
+	) async throws -> [String: Bool] {
+		let ffiClient = try await prepareClient(api: api)
+		return try await ffiClient.canMessage(
 			accountAddresses: accountAddresses)
+	}
 
-		try ffiClient.releaseDbConnection()
-		let fm = FileManager.default
-		try fm.removeItem(atPath: dbURL)
-
-		return result
+	public static func inboxStatesForInboxIds(
+		inboxIds: [String],
+		api: ClientOptions.Api
+	) async throws -> [InboxState] {
+		let ffiClient = try await prepareClient(api: api)
+		let result = try await ffiClient.addressesFromInboxId(
+			refreshFromNetwork: true, inboxIds: inboxIds)
+		return result.map { InboxState(ffiInboxState: $0) }
 	}
 
 	init(
@@ -358,31 +394,51 @@ public final class Client {
 		self.environment = environment
 	}
 
-	public func addAccount(newAccount: SigningKey)
+	@available(
+		*, deprecated,
+		message:
+			"This function is delicate and should be used with caution. Adding a wallet already associated with an inboxId will cause the wallet to loose access to that inbox. See: inboxIdFromAddress(address)"
+	)
+	public func addAccount(
+		newAccount: SigningKey, allowReassignInboxId: Bool = false
+	)
 		async throws
 	{
-		let signatureRequest = try await ffiClient.addWallet(
-			newWalletAddress: newAccount.address.lowercased())
-		do {
-			try await Client.handleSignature(
-				for: signatureRequest, signingKey: newAccount)
-			try await ffiClient.applySignatureRequest(
-				signatureRequest: signatureRequest)
-		} catch {
+		let inboxId: String? =
+			allowReassignInboxId
+			? nil : try await inboxIdFromAddress(address: newAccount.address)
+
+		if allowReassignInboxId || (inboxId?.isEmpty ?? true) {
+			let signatureRequest = try await ffiAddWallet(
+				addressToAdd: newAccount.address.lowercased())
+
+			do {
+				try await Client.handleSignature(
+					for: signatureRequest.ffiSignatureRequest,
+					signingKey: newAccount)
+				try await ffiApplySignatureRequest(
+					signatureRequest: signatureRequest)
+			} catch {
+				throw ClientError.creationError(
+					"Failed to sign the message: \(error.localizedDescription)")
+			}
+		} else {
 			throw ClientError.creationError(
-				"Failed to sign the message: \(error.localizedDescription)")
+				"This wallet is already associated with inbox \(inboxId ?? "Unknown")"
+			)
 		}
 	}
 
 	public func removeAccount(
 		recoveryAccount: SigningKey, addressToRemove: String
 	) async throws {
-		let signatureRequest = try await ffiClient.revokeWallet(
-			walletAddress: addressToRemove.lowercased())
+		let signatureRequest = try await ffiRevokeWallet(
+			addressToRemove: addressToRemove.lowercased())
 		do {
 			try await Client.handleSignature(
-				for: signatureRequest, signingKey: recoveryAccount)
-			try await ffiClient.applySignatureRequest(
+				for: signatureRequest.ffiSignatureRequest,
+				signingKey: recoveryAccount)
+			try await ffiApplySignatureRequest(
 				signatureRequest: signatureRequest)
 		} catch {
 			throw ClientError.creationError(
@@ -392,11 +448,30 @@ public final class Client {
 
 	public func revokeAllOtherInstallations(signingKey: SigningKey) async throws
 	{
-		let signatureRequest = try await ffiClient.revokeAllOtherInstallations()
+		let signatureRequest = try await ffiRevokeAllOtherInstallations()
 		do {
 			try await Client.handleSignature(
-				for: signatureRequest, signingKey: signingKey)
-			try await ffiClient.applySignatureRequest(
+				for: signatureRequest.ffiSignatureRequest,
+				signingKey: signingKey)
+			try await ffiApplySignatureRequest(
+				signatureRequest: signatureRequest)
+		} catch {
+			throw ClientError.creationError(
+				"Failed to sign the message: \(error.localizedDescription)")
+		}
+	}
+
+	public func revokeInstallations(
+		signingKey: SigningKey, installationIds: [String]
+	) async throws {
+		let installations = installationIds.map { $0.hexToData }
+		let signatureRequest = try await ffiRevokeInstallations(
+			ids: installations)
+		do {
+			try await Client.handleSignature(
+				for: signatureRequest.ffiSignatureRequest,
+				signingKey: signingKey)
+			try await ffiApplySignatureRequest(
 				signatureRequest: signatureRequest)
 		} catch {
 			throw ClientError.creationError(
@@ -466,80 +541,6 @@ public final class Client {
 		}
 	}
 
-	public func findGroup(groupId: String) throws -> Group? {
-		do {
-			return Group(
-				ffiGroup: try ffiClient.conversation(
-					conversationId: groupId.hexToData), client: self)
-		} catch {
-			return nil
-		}
-	}
-
-	public func findConversation(conversationId: String) async throws
-		-> Conversation?
-	{
-		do {
-			let conversation = try ffiClient.conversation(
-				conversationId: conversationId.hexToData)
-			return try await conversation.toConversation(client: self)
-		} catch {
-			return nil
-		}
-	}
-
-	public func findConversationByTopic(topic: String) async throws
-		-> Conversation?
-	{
-		do {
-			let regexPattern = #"/xmtp/mls/1/g-(.*?)/proto"#
-			if let regex = try? NSRegularExpression(pattern: regexPattern) {
-				let range = NSRange(location: 0, length: topic.utf16.count)
-				if let match = regex.firstMatch(
-					in: topic, options: [], range: range)
-				{
-					let conversationId = (topic as NSString).substring(
-						with: match.range(at: 1))
-					let conversation = try ffiClient.conversation(
-						conversationId: conversationId.hexToData)
-					return try await conversation.toConversation(client: self)
-				}
-			}
-		} catch {
-			return nil
-		}
-		return nil
-	}
-
-	public func findDmByInboxId(inboxId: String) throws -> Dm? {
-		do {
-			let conversation = try ffiClient.dmConversation(
-				targetInboxId: inboxId)
-			return Dm(ffiConversation: conversation, client: self)
-		} catch {
-			return nil
-		}
-	}
-
-	public func findDmByAddress(address: String) async throws -> Dm? {
-		guard let inboxId = try await inboxIdFromAddress(address: address)
-		else {
-			throw ClientError.creationError("No inboxId present")
-		}
-		return try findDmByInboxId(inboxId: inboxId)
-	}
-
-	public func findMessage(messageId: String) throws -> Message? {
-		do {
-			return Message.create(
-				client: self,
-				ffiMessage: try ffiClient.message(
-					messageId: messageId.hexToData))
-		} catch {
-			return nil
-		}
-	}
-
 	public func inboxState(refreshFromNetwork: Bool) async throws -> InboxState
 	{
 		return InboxState(
@@ -553,5 +554,120 @@ public final class Client {
 		return try await ffiClient.addressesFromInboxId(
 			refreshFromNetwork: refreshFromNetwork, inboxIds: inboxIds
 		).map { InboxState(ffiInboxState: $0) }
+	}
+
+	@available(
+		*,
+		deprecated,
+		message: """
+			This function is delicate and should be used with caution. 
+			Should only be used if trying to manage the signature flow independently; 
+			otherwise use `addAccount()`, `removeAccount()`, or `revoke()` instead.
+			"""
+	)
+	public func ffiApplySignatureRequest(signatureRequest: SignatureRequest)
+		async throws
+	{
+		try await ffiClient.applySignatureRequest(
+			signatureRequest: signatureRequest.ffiSignatureRequest)
+	}
+
+	@available(
+		*,
+		deprecated,
+		message: """
+			This function is delicate and should be used with caution. 
+			Should only be used if trying to manage the signature flow independently; 
+			otherwise use `revokeInstallations()` instead.
+			"""
+	)
+	public func ffiRevokeInstallations(ids: [Data]) async throws
+		-> SignatureRequest
+	{
+		let ffiSigReq = try await ffiClient.revokeInstallations(
+			installationIds: ids)
+		return SignatureRequest(ffiSignatureRequest: ffiSigReq)
+	}
+
+	@available(
+		*,
+		deprecated,
+		message: """
+			This function is delicate and should be used with caution. 
+			Should only be used if trying to manage the signature flow independently; 
+			otherwise use `revokeAllOtherInstallations()` instead.
+			"""
+	)
+	public func ffiRevokeAllOtherInstallations() async throws
+		-> SignatureRequest
+	{
+		let ffiSigReq = try await ffiClient.revokeAllOtherInstallations()
+		return SignatureRequest(ffiSignatureRequest: ffiSigReq)
+	}
+
+	@available(
+		*,
+		deprecated,
+		message: """
+			This function is delicate and should be used with caution. 
+			Should only be used if trying to manage the signature flow independently; 
+			otherwise use `removeWallet()` instead.
+			"""
+	)
+	public func ffiRevokeWallet(addressToRemove: String) async throws
+		-> SignatureRequest
+	{
+		let ffiSigReq = try await ffiClient.revokeWallet(
+			walletAddress: addressToRemove.lowercased())
+		return SignatureRequest(ffiSignatureRequest: ffiSigReq)
+	}
+
+	@available(
+		*,
+		deprecated,
+		message: """
+			This function is delicate and should be used with caution. 
+			Should only be used if trying to manage the create and register flow independently; 
+			otherwise use `addWallet()` instead.
+			"""
+	)
+	public func ffiAddWallet(addressToAdd: String) async throws
+		-> SignatureRequest
+	{
+		let ffiSigReq = try await ffiClient.addWallet(
+			newWalletAddress: addressToAdd.lowercased())
+		return SignatureRequest(ffiSignatureRequest: ffiSigReq)
+	}
+
+	@available(
+		*,
+		deprecated,
+		message: """
+			This function is delicate and should be used with caution. 
+			Should only be used if trying to manage the signature flow independently; 
+			otherwise use `create()` instead.
+			"""
+	)
+	public func ffiSignatureRequest() -> SignatureRequest? {
+		guard let ffiReq = ffiClient.signatureRequest() else {
+			return nil
+		}
+		return SignatureRequest(ffiSignatureRequest: ffiReq)
+	}
+
+	@available(
+		*,
+		deprecated,
+		message: """
+			This function is delicate and should be used with caution. 
+			Should only be used if trying to manage the create and register flow independently; 
+			otherwise use `create()` instead.
+			"""
+	)
+	public func ffiRegisterIdentity(signatureRequest: SignatureRequest)
+		async throws
+	{
+		try await ffiClient.registerIdentity(
+			signatureRequest: signatureRequest.ffiSignatureRequest)
 	}
 }

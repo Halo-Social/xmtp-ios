@@ -15,7 +15,7 @@ class AttachmentsTests: XCTestCase {
 		let conversation = try await fixtures.alixClient.conversations
 			.newConversation(with: fixtures.boClient.address)
 
-		fixtures.alixClient.register(codec: AttachmentCodec())
+		Client.register(codec: AttachmentCodec())
 
 		try await conversation.send(
 			content: Attachment(
@@ -23,7 +23,7 @@ class AttachmentsTests: XCTestCase {
 			options: .init(contentType: ContentTypeAttachment))
 		let messages = try await conversation.messages()
 
-		XCTAssertEqual(1, messages.count)
+		XCTAssertEqual(2, messages.count)
 
 		let message = messages[0]
 		let attachment: Attachment = try message.content()
